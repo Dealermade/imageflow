@@ -1,8 +1,9 @@
 [package]
 name = "imageflow_server"
 version = "0.1.0"
-authors = ["Nathanael Jones <nathanael.jones@gmail.com>"]
+authors = ["Lilith River <lilith@imazen.io>"]
 workspace = "../"
+edition = "2018"
 
 
 
@@ -10,7 +11,7 @@ workspace = "../"
 libc = "0.2"
 
 # time
-time = "0.1"
+time = "0.2"
 chrono =  "0.4"
 
 # serialization
@@ -18,6 +19,7 @@ serde = "1"
 serde_json = "1"
 serde_derive = "1"
 rustc-serialize = "*"
+base64 = "0.13"
 
 #lazy static
 lazy_static = "1"
@@ -32,32 +34,32 @@ blake2-rfc = "*"
 
 clap = "2"
 
-router = "0.5"
-iron = "=0.5.1"
-
-
-hyper = { version = "=0.10.12", default-features = false }
-threadpool = "1.0"
-
 imageflow_core = { path = "../imageflow_core", version = "*" }
 imageflow_types = { path = "../imageflow_types", version = "*" }
 imageflow_helpers = { path = "../imageflow_helpers", version = "*" }
 imageflow_riapi = { path = "../imageflow_riapi", version = "*" }
+imageflow_http_helpers = { path = "../imageflow_http_helpers", version = "*" }
 
 
-rand = "0.3"
+rand = "0.6"
 lru-cache = "0.1"
-persistent = "0.3"
-regex = "0.2"
-log="0.3"
-env_logger="0.4"
-wait-timeout = "0.1"
-bincode= {git= "https://github.com/TyOverby/bincode" }
+regex = "1"
+log="0.4"
+env_logger="0.7"
+wait-timeout = "0.2"
+
+bincode = "1"
 staticfile = { git= "https://github.com/onur/staticfile", rev= "9f2ff7201eda648128c92e3f5597c587f0629f51" }
 conduit-mime-types = "0.7"
-url="1.4"
-hyper-native-tls="0.2"
-reqwest="0.6"
+router = "=0.5"
+iron = "=0.5.1"
+persistent = "=0.4"
+hyper = { version = "0.13", default-features = false }
+threadpool = "1.8"
+url="1"
+hyper-native-tls="0.3"
+reqwest="0.9"
+http="*"
 
 [[bin]]
 name = "imageflow_server"
@@ -71,3 +73,6 @@ rev = "2c3d719be4c158d4ddbd8cdb402fafccdefec58c"
 [dependencies.logger]
 git = "https://github.com/iron/logger.git"
 rev = "0daead5fe10c3cd0c4738767c162dc63a59c3fb3"
+
+[features]
+nightly = ["imageflow_core/nightly", "imageflow_helpers/nightly"]

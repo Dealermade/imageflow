@@ -1,55 +1,77 @@
 use super::Encoder;
 use super::s::{EncoderPreset, EncodeResult};
-use io::IoProxy;
-use ffi::BitmapBgra;
+use crate::io::IoProxy;
+use crate::ffi::BitmapBgra;
 use imageflow_types::PixelFormat;
-use ::{Context, Result, ErrorKind};
+use crate::{Context, Result, ErrorKind};
 use std::result::Result as StdResult;
-use io::IoProxyRef;
+use crate::io::IoProxyRef;
 use std::slice;
 use std::rc::Rc;
 use std::cell::RefCell;
 use std::os::raw::c_int;
 use imagequant;
-use codecs::lode;
+use crate::codecs::lode;
+use crate::graphics::bitmaps::BitmapKey;
 
 pub struct PngquantEncoder {
     liq: imagequant::Attributes,
     io: IoProxy,
+    maximum_deflate: Option<bool>,
 }
 
 impl PngquantEncoder {
-    pub(crate) fn create(c: &Context, speed: Option<u8>, quality: Option<(u8, u8)>, io: IoProxy) -> Result<Self> {
+    pub(crate) fn create(c: &Context, speed: Option<u8>, quality: Option<u8>, minimum_quality: Option<u8>, maximum_deflate: Option<bool>, io: IoProxy) -> Result<Self> {
+        if !c.enabled_codecs.encoders.contains(&crate::codecs::NamedEncoders::PngQuantEncoder){
+            return Err(nerror!(ErrorKind::CodecDisabledError, "The PNGQuant encoder has been disabled"));
+        }
         let mut liq = imagequant::new();
         if let Some(speed) = speed {
-            liq.set_speed(speed.into());
+            liq.set_speed(u8::min(10, u8::max(1, speed)).into());
         }
-        if let Some((min, max)) = quality {
-            liq.set_quality(min.into(), max.into());
-        }
+        let min = u8::min(100, minimum_quality.unwrap_or(0));
+        let max = u8::min(100,quality.unwrap_or(100));
+        liq.set_quality(min.into(), max.into());
+
         Ok(PngquantEncoder {
             liq,
             io,
+            maximum_deflate
         })
     }
 }
 
 impl Encoder for PngquantEncoder {
-    fn write_frame(&mut self, c: &Context, preset: &EncoderPreset, frame: &mut BitmapBgra, decoder_io_ids: &[i32]) -> Result<EncodeResult> {
-        if let Some((pal, pixels)) = self.quantize(frame)? {
-            lode::LodepngEncoder::write_png8(&mut self.io, &pal, &pixels, frame.w as usize, frame.h as usize)?;
-        } else {
-            lode::LodepngEncoder::write_png_auto(&mut self.io, &frame)?;
-        };
+    fn write_frame(&mut self, c: &Context, preset: &EncoderPreset, bitmap_key: BitmapKey, decoder_io_ids: &[i32]) -> Result<EncodeResult> {
 
-        Ok(EncodeResult {
-            w: frame.w as i32,
-            h: frame.h as i32,
-            io_id: self.io.io_id(),
-            bytes: ::imageflow_types::ResultBytes::Elsewhere,
-            preferred_extension: "png".to_owned(),
-            preferred_mime_type: "image/png".to_owned(),
-        })
+        let bitmaps = c.borrow_bitmaps()
+            .map_err(|e| e.at(here!()))?;
+
+        let mut bitmap = bitmaps.try_borrow_mut(bitmap_key)
+            .map_err(|e| e.at(here!()))?;
+
+        unsafe {
+            let frame = bitmap.get_window_u8()
+                .ok_or_else(|| nerror!(ErrorKind::InvalidBitmapType))?
+                .to_bitmap_bgra().map_err(|e| e.at(here!()))?;
+
+
+            if let Some((pal, pixels)) = self.quantize(&frame)? {
+                lode::LodepngEncoder::write_png8(&mut self.io, &pal, &pixels, bitmap.w() as usize, bitmap.h() as usize, self.maximum_deflate)?;
+            } else {
+                lode::LodepngEncoder::write_png_auto(&mut self.io, &frame, self.maximum_deflate)?;
+            };
+
+
+            Ok(EncodeResult {
+                w: frame.w as i32,
+                h: frame.h as i32,
+                io_id: self.io.io_id(),
+                bytes: ::imageflow_types::ResultBytes::Elsewhere,
+                preferred_extension: "png".to_owned(),
+                preferred_mime_type: "image/png".to_owned(),
+            })
+        }
     }
 
     fn get_io(&self) -> Result<IoProxyRef> {

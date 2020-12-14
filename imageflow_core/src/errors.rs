@@ -1,16 +1,17 @@
 use std;
 use std::fmt;
-use context::Context;
+use crate::context::Context;
 use std::borrow::Cow;
 use std::any::Any;
 use std::io::Write;
 use std::io;
 use std::cmp;
 use num::FromPrimitive;
-use ffi;
+use crate::ffi;
 use std::ffi::CStr;
 use std::ptr;
 use imageflow_riapi::sizing::LayoutError;
+use crate::flow::definitions::FrameEstimate;
 
 #[test]
 fn test_file_macro_for_this_build(){
@@ -24,7 +25,7 @@ fn test_file_macro_for_this_build(){
 #[macro_export]
 macro_rules! here {
     () => (
-        ::CodeLocation::new(file!(), line!(), column!())
+        crate::CodeLocation::new(file!(), line!(), column!())
     );
 }
 
@@ -50,7 +51,7 @@ macro_rules! loc {
 #[macro_export]
 macro_rules! nerror {
     ($kind:expr) => (
-        ::FlowError{
+        crate::FlowError{
             kind: $kind,
             message: String::new(), // If .message() is needed after all, then crate_enum_derive on ErrorKind and switch message to Cow<>
             at: ::smallvec::SmallVec::new(),
@@ -58,7 +59,7 @@ macro_rules! nerror {
         }.at(here!())
     );
     ($kind:expr, $fmt:expr) => (
-        ::FlowError{
+        crate::FlowError{
             kind: $kind,
             message:  format!(concat!("{:?}: ",$fmt ), $kind,),
             at: ::smallvec::SmallVec::new(),
@@ -66,7 +67,7 @@ macro_rules! nerror {
         }.at(here!())
     );
     ($kind:expr, $fmt:expr, $($arg:tt)*) => (
-        ::FlowError{
+        crate::FlowError{
             kind: $kind,
             message:  format!(concat!("{:?}: ", $fmt), $kind, $($arg)*),
             at: ::smallvec::SmallVec::new(),
@@ -79,17 +80,17 @@ macro_rules! nerror {
 #[macro_export]
 macro_rules! unimpl {
     () => (
-        ::FlowError{
-            kind: ::ErrorKind::MethodNotImplemented,
+        crate::FlowError{
+            kind: crate::ErrorKind::MethodNotImplemented,
             message: String::new(),
             at: ::smallvec::SmallVec::new(),
             node: None
         }.at(here!())
     );
     ($fmt:expr) => (
-        ::FlowError{
-            kind: ::ErrorKind::MethodNotImplemented,
-            message: format!(concat!("{:?}: ",$fmt ), ::ErrorKind::MethodNotImplemented),
+        crate::FlowError{
+            kind: crate::ErrorKind::MethodNotImplemented,
+            message: format!(concat!("{:?}: ",$fmt ), crate::ErrorKind::MethodNotImplemented),
             at: ::smallvec::SmallVec::new(),
             node: None
         }.at(here!())
@@ -105,8 +106,8 @@ macro_rules! unimpl {
 macro_rules! cerror {
     ($context:expr) => {{
         let cerr = $ context.c_error().require();
-        ::FlowError{
-            kind: ::ErrorKind::CError(cerr.status()),
+        crate::FlowError{
+            kind: crate::ErrorKind::CError(cerr.status()),
             message: cerr.into_string(), // String::new() is zero-alloc (always on OOM)
             at: ::smallvec::SmallVec::new(),
             node: None
@@ -114,8 +115,8 @@ macro_rules! cerror {
     }};
     ($context:expr, $fmt:expr) => {{
         let cerr = $context.c_error().require();
-        ::FlowError{
-            kind: ::ErrorKind::CError(cerr.status()),
+        crate::FlowError{
+            kind: crate::ErrorKind::CError(cerr.status()),
             message: if cerr.is_oom() {
                         cerr.into_string()
                      }else {
@@ -127,8 +128,8 @@ macro_rules! cerror {
     }};
     ($context:expr, $fmt:expr, $($arg:tt)*) => {{
         let cerr = $context.c_error().require();
-        ::FlowError{
-            kind: ::ErrorKind::CError(cerr.status()),
+        crate::FlowError{
+            kind: crate::ErrorKind::CError(cerr.status()),
             message: if cerr.is_oom() {
                         cerr.into_string()
                      }else {
@@ -144,8 +145,8 @@ macro_rules! cerror {
 #[macro_export]
 macro_rules! err_oom {
     () => (
-        ::FlowError{
-            kind: ::ErrorKind::AllocationFailed,
+        crate::FlowError{
+            kind: crate::ErrorKind::AllocationFailed,
             message: String::new(),
             at: ::smallvec::SmallVec::new(),
             node: None
@@ -170,11 +171,18 @@ pub enum ErrorKind{
     AllocationFailed,
     GifDecodingError,
     GifEncodingError,
+    ImageDecodingError,
+    ImageEncodingError,
+    JpegDecodingError,
     QuantizationError,
-    LodepngEncodingError,
+    LodePngEncodingError,
+    MozjpegEncodingError,
+    CodecDisabledError,
+    NoEnabledDecoderFound,
     DecodingIoError,
     ColorProfileError,
     EncodingIoError,
+    VisualizerIoError,
     GraphCyclic,
     InvalidNodeConnections,
     LayoutError,
@@ -186,6 +194,7 @@ pub enum ErrorKind{
     InvalidNodeParams,
     InvalidMessageEndpoint,
     IoIdNotFound,
+    BitmapKeyNotFound,
     ItemNotFound,
     FailedBorrow,
     NodeParamsMismatch,
@@ -194,6 +203,9 @@ pub enum ErrorKind{
     ValidationNotImplemented,
     InvalidOperation,
     InvalidState,
+    FetchError,
+    SizeLimitExceeded,
+    InvalidBitmapType,
     Category(ErrorCategory),
     CError(CStatus)
 }
@@ -213,6 +225,8 @@ impl CategorizedError for ErrorKind{
             ErrorKind::ItemNotFound |
             ErrorKind::DuplicateIoId |
             ErrorKind::LayoutError |
+            ErrorKind::CodecDisabledError |
+            ErrorKind::SizeLimitExceeded |
             ErrorKind::InvalidNodeParams => ErrorCategory::ArgumentInvalid,
 
             ErrorKind::FailedBorrow |
@@ -224,10 +238,19 @@ impl CategorizedError for ErrorKind{
             ErrorKind::InternalError |
             ErrorKind::InvalidState |
             ErrorKind::QuantizationError |
-            ErrorKind::LodepngEncodingError |
+            ErrorKind::LodePngEncodingError |
+            ErrorKind::MozjpegEncodingError |
+            ErrorKind::ImageEncodingError |
+            ErrorKind::BitmapKeyNotFound |
+            ErrorKind::VisualizerIoError |
+            ErrorKind::InvalidBitmapType |
             ErrorKind::GifEncodingError => ErrorCategory::InternalError,
             ErrorKind::GifDecodingError |
+            ErrorKind::JpegDecodingError |
+            ErrorKind::NoEnabledDecoderFound |
+            ErrorKind::ImageDecodingError |
             ErrorKind::ColorProfileError => ErrorCategory::ImageMalformed,
+            ErrorKind::FetchError |
             ErrorKind::DecodingIoError |
             ErrorKind::EncodingIoError => ErrorCategory::IoError,
             ErrorKind::CError(ref e) => e.category(),
@@ -278,7 +301,7 @@ pub struct FlowError {
     pub kind: ErrorKind,
     pub message: String,
     pub at: ::smallvec::SmallVec<[CodeLocation;1]>,
-    pub node: Option<Box<::flow::definitions::NodeDebugInfo>>
+    pub node: Option<Box<crate::flow::definitions::NodeDebugInfo>>
 }
 
 
@@ -291,12 +314,30 @@ impl From<::gif::DecodingError> for FlowError{
         }
     }
 }
-
-impl From<::lcms2::Error> for FlowError{
-    fn from(e: ::lcms2::Error) -> Self {
-        FlowError::without_location(ErrorKind::ColorProfileError, format!("{:?}", e))
+impl From<::imageflow_helpers::colors::ParseColorError> for FlowError{
+    fn from(f: ::imageflow_helpers::colors::ParseColorError) -> Self {
+        match f {
+            ::imageflow_helpers::colors::ParseColorError::ColorNotRecognized(e) =>
+                FlowError::without_location(ErrorKind::InvalidArgument, format!("Color Not Recognized: {:?}", e)),
+            ::imageflow_helpers::colors::ParseColorError::FormatIncorrect(e) =>
+                FlowError::without_location(ErrorKind::InvalidArgument, format!("Color Format Incorrect: {:?}", e)),
+            ::imageflow_helpers::colors::ParseColorError::NotHexadecimal{ desc, parse_error } =>
+                FlowError::without_location(ErrorKind::InvalidArgument, format!("Color Not Hexadecimal: {:?} {:?}",desc, parse_error)),
+        }
     }
 }
+
+impl From<jpeg_decoder::Error> for FlowError{
+    fn from(f: jpeg_decoder::Error) -> Self {
+        match f {
+            jpeg_decoder::Error::Io(e) => FlowError::without_location(ErrorKind::DecodingIoError, format!("{:?}", e)),
+            jpeg_decoder::Error::Internal(msg) => FlowError::without_location(ErrorKind::InternalError,format!("Internal error in rust jpeg_decoder: {:?}",msg)),
+            jpeg_decoder::Error::Format(msg) => FlowError::without_location(ErrorKind::JpegDecodingError,format!("{:?}",msg)),
+            jpeg_decoder::Error::Unsupported(feature) => FlowError::without_location(ErrorKind::JpegDecodingError,format!("rust jpeg_decoder: Unsupported jpeg feature{:?}",feature)),
+        }
+    }
+}
+
 
 impl From<::imagequant::liq_error> for FlowError {
     fn from(e: ::imagequant::liq_error) -> Self {
@@ -306,11 +347,15 @@ impl From<::imagequant::liq_error> for FlowError {
 
 impl From<::lodepng::Error> for FlowError {
     fn from(e: ::lodepng::Error) -> Self {
-        FlowError::without_location(ErrorKind::LodepngEncodingError, format!("lodepng: {}", e))
+        FlowError::without_location(ErrorKind::LodePngEncodingError, format!("lodepng: {}", e))
     }
 }
 
 impl FlowError {
+    pub fn from_visualizer(e: ::std::io::Error) -> Self {
+        FlowError::without_location(ErrorKind::VisualizerIoError, format!("{:?}", e))
+    }
+
     pub fn from_encoder(e: ::std::io::Error) -> Self{
         if e.kind() == ::std::io::ErrorKind::InvalidInput{
             FlowError::without_location(ErrorKind::InternalError, format!("{:?}", e))
@@ -319,8 +364,16 @@ impl FlowError {
         }
 
     }
+    pub fn from_decoder(e: ::std::io::Error) -> Self{
+        if e.kind() == ::std::io::ErrorKind::InvalidInput{
+            FlowError::without_location(ErrorKind::InternalError, format!("{:?}", e))
+        }else{
+            FlowError::without_location(ErrorKind::DecodingIoError, format!("{:?}", e))
+        }
 
+    }
 }
+
 
 
 #[test]
@@ -663,7 +716,7 @@ impl ErrorCategory{
 /// A buffer for errors/panics that can occur when libimageflow is being used via FFI
 pub struct OutwardErrorBuffer{
     category: ErrorCategory,
-    last_panic: Option<Box<Any>>,
+    last_panic: Option<Box<dyn Any>>,
     last_error: Option<FlowError>
 }
 impl Default for OutwardErrorBuffer {
@@ -681,7 +734,7 @@ impl OutwardErrorBuffer{
     }
     /// Sets the last panic (but only if none is set)
     /// We always prefer to keep the earliest panic
-    pub fn try_set_panic_error(&mut self, value: Box<Any>) -> bool{
+    pub fn try_set_panic_error(&mut self, value: Box<dyn Any>) -> bool{
         if self.last_panic.is_none() {
             self.category = ErrorCategory::InternalError;
             self.last_panic = Some(value);
@@ -830,7 +883,7 @@ impl CStatus {
 
 /// Implement Display for various Any types that are raised via Panic
 /// Currently only implemented for owned and static strings
-pub struct PanicFormatter<'a>(pub &'a Any);
+pub struct PanicFormatter<'a>(pub &'a dyn Any);
 impl<'a> std::fmt::Display for PanicFormatter<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         if let Some(str) = self.0.downcast_ref::<String>() {
@@ -1071,7 +1124,7 @@ impl CErrorProxy {
             let mut buf = vec![0u8; 2048];
 
             let chars_written =
-                ::ffi::flow_context_error_and_stacktrace(self.c_ctx, buf.as_mut_ptr(), buf.len(), false);
+                crate::ffi::flow_context_error_and_stacktrace(self.c_ctx, buf.as_mut_ptr(), buf.len(), false);
 
             if chars_written < 0 {
                 //TODO: Retry until it fits
@@ -1100,7 +1153,7 @@ impl CErrorProxy{
     ///  `imageflow_context_clear_error`. You'll be ignored, as will future
     ///   `imageflow_add_to_callstack` invocations.
     ///
-    /// * If you provide an error code of zero one will be substited for you.
+    /// * If you provide an error code of zero one will be substituted for you.
     ///
     /// Returns None if the context already has an error
     fn raise_error(&mut self, e: FlowError)

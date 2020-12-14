@@ -51,7 +51,7 @@ fn main_with_exit_code() -> i32 {
                 .arg(
                     Arg::with_name("mount").long("mount").takes_value(true).empty_values(false).multiple(true).required_unless("demo")
                         .validator(|f| parse_mount(&f).map(|_| ()))
-                        .help("Serve images from the given location using the provided API, e.g --mount \"/prefix/:ir4_local:./{}\" --mount \"/extern/:ir4_http:http:://domain.com/{}\"\n Escape colons by doubling, e.g. http:// -> http:://")
+                        .help("Serve images from the given location using the provided API, e.g --mount \"/prefix/:ir4_local:./{}\" --mount \"/extern/:ir4_http:http:://domain.com/\" --mount \"/extern/:ir4_proxy_uncached:http:://domain.com/\"\n Escape colons by doubling, e.g. http:// -> http:://")
                 )
                 .arg(Arg::with_name("bind-address").long("bind-address").takes_value(true).required(false).default_value("localhost")
                     .help("The IPv4 or IPv6 address to bind to (or the hostname, like localhost). 0.0.0.0 binds to all addresses."
@@ -106,15 +106,6 @@ fn main_with_exit_code() -> i32 {
         }
         let bind = m.value_of("bind-address").map(|s| s.to_owned()).expect("bind address required");
 
-//        let is_release = option_env!("GIT_OPTIONAL_TAG").is_some() && !option_env!("GIT_OPTIONAL_TAG").unwrap().is_empty();
-//        let vars_present = option_env!("GIT_COMMIT").is_some();
-//        if is_release || !vars_present {
-//            if bind != "localhost" && bind != "127.0.0.1" && bind != "::1" {
-//                println!("This build of imageflow_server only permits connections from localhost (address {} rejected). It is not secure.", &bind);
-//                std::process::exit(64);
-//            }
-//        }
-
         let combined = format!("{}:{}", bind, port);
 
         {
@@ -150,6 +141,16 @@ fn main_with_exit_code() -> i32 {
             MountLocation {
                 engine: MountedEngine::Ir4Http,
                 prefix: "/demo_images/".to_owned(),
+                engine_args: vec!["http://resizer-images.s3.amazonaws.com/".to_owned()]
+            },
+            MountLocation {
+                engine: MountedEngine::Ir4Http,
+                prefix: "/website_images/".to_owned(),
+                engine_args: vec!["http://resizer-web.s3.amazonaws.com/".to_owned()]
+            },
+            MountLocation {
+                engine: MountedEngine::Ir4ProxyUncached,
+                prefix: "/demo_images_uncached/".to_owned(),
                 engine_args: vec!["http://resizer-images.s3.amazonaws.com/".to_owned()]
             }
             ];

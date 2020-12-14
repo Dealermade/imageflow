@@ -37,7 +37,7 @@ printf "travis_run.sh:  "
 
 ## CONFIGURATION
 # VALGRIND=True or False
-# 
+#
 ## MOST LIKELY TO GET POLLUTED
 # GIT_* vars
 # BUILD_RELEASE
@@ -103,11 +103,11 @@ export GIT_DESCRIBE_AAL
 GIT_DESCRIBE_AAL="${GIT_DESCRIBE_AAL:-$(git describe --always --all --long)}"
 
 # But let others override GIT_OPTIONAL_BRANCH, as HEAD might not have a symbolic ref, and it could crash
-# I.e, provide GIT_OPTIONAL_BRANCH to this script in Travis - but NOT For 
+# I.e, provide GIT_OPTIONAL_BRANCH to this script in Travis - but NOT For
 export GIT_OPTIONAL_BRANCH
-if git symbolic-ref --short HEAD 1>&9 2>&9 ; then 
+if git symbolic-ref --short HEAD 1>&9 2>&9 ; then
 	GIT_OPTIONAL_BRANCH="${GIT_OPTIONAL_BRANCH:-$(git symbolic-ref --short HEAD)}"
-fi 
+fi
 echo_maybe "Naming things... (using TRAVIS_TAG=${TRAVIS_TAG}, GIT_OPTIONAL_BRANCH=${GIT_OPTIONAL_BRANCH}, PACKAGE_SUFFIX=${PACKAGE_SUFFIX}, GIT_DESCRIBE_ALWAYS_LONG=${GIT_DESCRIBE_ALWAYS_LONG}, CI_SEQUENTIAL_BUILD_NUMBER=${CI_SEQUENTIAL_BUILD_NUMBER}, GIT_COMMIT_SHORT=$GIT_COMMIT_SHORT, GIT_COMMIT=$GIT_COMMIT, FETCH_COMMIT_SUFFIX=${FETCH_COMMIT_SUFFIX})"
 ################## NAMING THINGS ####################
 
@@ -141,7 +141,7 @@ if [ "${TRAVIS_PULL_REQUEST}" == "false" ]; then
 			export ESTIMATED_DOCS_URL="${ESTIMATED_DOCS_URL:-${ESTIMATED_DOCS_URL_2}}"
 			if [[ "$ESTIMATED_DOCS_URL_2" == "$ESTIMATED_DOCS_URL" ]]; then
 				export ESTIMATED_DOCS_URL_2=
-			fi 
+			fi
 		fi
 
 		if [ -n "${FETCH_COMMIT_SUFFIX}" ]; then
@@ -176,14 +176,14 @@ else
 
 	export URL_LIST
 	URL_LIST="$(printf "\n%s\n\n%s\n\n%s\n\n%s\n\n%s\n" "${ESTIMATED_ARTIFACT_URL}" "${ESTIMATED_ARTIFACT_URL_2}" "${ESTIMATED_ARTIFACT_URL_3}" "${ESTIMATED_DOCS_URL}" "${ESTIMATED_DOCS_URL_2}" | tr -s '\n')"
-	
+
 fi
 
-if [[ "$(echo "$URL_LIST" | tr -d '\r\n')" != "" ]]; then 
+if [[ "$(echo "$URL_LIST" | tr -d '\r\n')" != "" ]]; then
 	printf "\n=================================================\n\n" 1>&9
 	printf "Estimated upload URLs:\n%s\n" "${URL_LIST}"
 	printf "\n=================================================\n" 1>&9
-fi 
+fi
 
 
 
@@ -192,7 +192,7 @@ export COVERAGE="${COVERAGE:-False}"
 export VALGRIND="${VALGRIND:-False}"
 
 ## Force rebuild of the final binaries (not even the shared libraries of imageflow) when TRAVIS_TAG=true
-if [[ -n "$TRAVIS_TAG" ]]; then 
+if [[ -n "$TRAVIS_TAG" ]]; then
 	export CLEAN_RUST_TARGETS="${CLEAN_RUST_TARGETS:-True}"
 	export CLEAN_RELEASE=True
 	export CLEAN_DEBUG=True
@@ -222,11 +222,11 @@ if [[ "$VALGRIND" == "True" ]]; then
 else
 	export BUILD_RELEASE="${BUILD_RELEASE:-True}"
 	export TEST_RELEASE="${TEST_RELEASE:-True}"
-fi 
+fi
 
 # Compile and run C tests
 export TEST_C="${TEST_C:-True}"
-# Enables generated coverage information for the C portion of the code. 
+# Enables generated coverage information for the C portion of the code.
 # Also forces C tests to build in debug mode
 export COVERAGE="${COVERAGE:-False}"
 # travis_run_docker.sh uploads Coverage information when true
@@ -264,10 +264,12 @@ DOCKER_ENV_VARS=(
 	 "CLEAN_RELEASE=${CLEAN_RELEASE}"
 	"-e"
 	 "TEST_RELEASE=${TEST_RELEASE}"
+	 "-e"
+	 "SKIP_HOST_CARGO_EXPORT=${SIM_CI}"
 	"-e"
 	 "BUILD_RELEASE=${BUILD_RELEASE}"
 	"-e"
-	 "VALGRIND=${VALGRIND}" 
+	 "VALGRIND=${VALGRIND}"
 	"-e"
 	 "TEST_C=${TEST_C}"
 	"-e"
@@ -275,91 +277,101 @@ DOCKER_ENV_VARS=(
 	"-e"
 	 "TUNE_CPU=${TUNE_CPU}"
 	"-e"
-	 "COVERAGE=${COVERAGE}" 
+	 "COVERAGE=${COVERAGE}"
 	"-e"
-	"CARGO_TARGET=${CARGO_TARGET}" 
+	"CARGO_TARGET=${CARGO_TARGET}"
 	"-e"
-	 "COVERALLS=${COVERALLS}" 
+	 "COVERALLS=${COVERALLS}"
 	 "-e"
-	 "CODECOV=${CODECOV}" 
+	 "CODECOV=${CODECOV}"
 	"-e"
 	 "COVERALLS_TOKEN=${COVERALLS_TOKEN}"
 	"-e"
-	 "DOCS_UPLOAD_DIR=${DOCS_UPLOAD_DIR}" 
+	 "DOCS_UPLOAD_DIR=${DOCS_UPLOAD_DIR}"
 	"-e"
-	 "DOCS_UPLOAD_DIR_2=${DOCS_UPLOAD_DIR}" 
+	"DEPLOY_DOCS=${DEPLOY_DOCS}"
 	"-e"
-	 "ARTIFACT_UPLOAD_PATH=${ARTIFACT_UPLOAD_PATH}"  
+	 "DOCS_UPLOAD_DIR_2=${DOCS_UPLOAD_DIR}"
 	"-e"
-	 "ARTIFACT_UPLOAD_PATH_2=${ARTIFACT_UPLOAD_PATH_2}" 
+	 "ARTIFACT_UPLOAD_PATH=${ARTIFACT_UPLOAD_PATH}"
 	"-e"
-	 "ARTIFACT_UPLOAD_PATH_3=${ARTIFACT_UPLOAD_PATH_3}" 
-		"-e"
-	 "GIT_COMMIT=${GIT_COMMIT}" 
-		"-e"
-	 "PACKAGE_SUFFIX=${PACKAGE_SUFFIX}" 
+	 "ARTIFACT_UPLOAD_PATH_2=${ARTIFACT_UPLOAD_PATH_2}"
 	"-e"
-	"NUGET_RUNTIME=${NUGET_RUNTIME}" 
+	 "ARTIFACT_UPLOAD_PATH_3=${ARTIFACT_UPLOAD_PATH_3}"
 	"-e"
-	 "GIT_COMMIT_SHORT=${GIT_COMMIT_SHORT}" 
+	 "SCCACHE_BUCKET=${SCCACHE_BUCKET}"
 	"-e"
-	 "GIT_OPTIONAL_TAG=${GIT_OPTIONAL_TAG}" 
+	 "AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}"
 	"-e"
-	 "GIT_DESCRIBE_ALWAYS=${GIT_DESCRIBE_ALWAYS}" 
+	 "AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}"
 	"-e"
-	 "GIT_DESCRIBE_ALWAYS_LONG=${GIT_DESCRIBE_ALWAYS_LONG}" 
+	 "GIT_COMMIT=${GIT_COMMIT}"
+	"-e"
+	 "PACKAGE_SUFFIX=${PACKAGE_SUFFIX}"
+	"-e"
+	"NUGET_RUNTIME=${NUGET_RUNTIME}"
+	"-e"
+	 "GIT_COMMIT_SHORT=${GIT_COMMIT_SHORT}"
+	"-e"
+	 "GIT_OPTIONAL_TAG=${GIT_OPTIONAL_TAG}"
+	"-e"
+	 "GIT_DESCRIBE_ALWAYS=${GIT_DESCRIBE_ALWAYS}"
+	"-e"
+	 "GIT_DESCRIBE_ALWAYS_LONG=${GIT_DESCRIBE_ALWAYS_LONG}"
 	 "-e"
 	 "RUNTIME_REQUIREMENTS_FILE=${RUNTIME_REQUIREMENTS_FILE}"
 	"-e"
-	 "GIT_DESCRIBE_AAL=${GIT_DESCRIBE_AAL}" 
+	 "GIT_DESCRIBE_AAL=${GIT_DESCRIBE_AAL}"
 	"-e"
-	 "GIT_OPTIONAL_BRANCH=${GIT_OPTIONAL_BRANCH}" 
+	 "GIT_OPTIONAL_BRANCH=${GIT_OPTIONAL_BRANCH}"
 	"-e"
-	 "ESTIMATED_ARTIFACT_URL=${ESTIMATED_ARTIFACT_URL}" 
+	 "ESTIMATED_ARTIFACT_URL=${ESTIMATED_ARTIFACT_URL}"
 	"-e"
-	 "ESTIMATED_DOCS_URL=${ESTIMATED_DOCS_URL}" 
+	 "ESTIMATED_DOCS_URL=${ESTIMATED_DOCS_URL}"
 	"-e"
-	 "CI_SEQUENTIAL_BUILD_NUMBER=${CI_SEQUENTIAL_BUILD_NUMBER}" 
+	 "CI_SEQUENTIAL_BUILD_NUMBER=${CI_SEQUENTIAL_BUILD_NUMBER}"
 	"-e"
-	 "CI_BUILD_URL=${CI_BUILD_URL}" 
+	 "CI_BUILD_URL=${CI_BUILD_URL}"
 	"-e"
-	 "CI_JOB_URL=${CI_JOB_URL}" 
+	 "CI_JOB_URL=${CI_JOB_URL}"
 	"-e"
-	 "CI_JOB_TITLE=${CI_JOB_TITLE}" 
+	 "CI_JOB_TITLE=${CI_JOB_TITLE}"
 	"-e"
-	 "CI_STRING=${CI_STRING}" 
+	 "CI_STRING=${CI_STRING}"
 	"-e"
-	 "CI_PULL_REQUEST_INFO=${CI_PULL_REQUEST_INFO}" 
+	 "CI_PULL_REQUEST_INFO=${CI_PULL_REQUEST_INFO}"
 	"-e"
-	 "CI_TAG=${CI_TAG}" 
+	 "CI_TAG=${CI_TAG}"
 	 "-e"
-	 "CI_REPO=${CI_REPO}" 
+	 "CI_REPO=${CI_REPO}"
 	"-e"
-	 "CI_RELATED_BRANCH=${CI_RELATED_BRANCH}" 
+	 "CI_RELATED_BRANCH=${CI_RELATED_BRANCH}"
 	 "-e"
 	 "BUILD_QUIETER=${BUILD_QUIETER}"
 )
 
 
-echo_maybe 
+echo_maybe
 echo_maybe "========================================================="
 echo_maybe "Relevant dockered ENV VARS for build.sh: ${DOCKER_ENV_VARS[*]}"
 echo_maybe "========================================================="
-echo_maybe 
+echo_maybe
 ##############################
 
 
 if [[ "$(uname -s)" == 'Darwin' && -z "$SIM_CI" ]]; then
-	./ci/travis_run_osx.sh
+	./build.sh
 else
 	echo_maybe "===================================================================== [travis_run.sh]"
 	echo "Launching docker SIM_CI=${SIM_CI}"
 	echo
 
 	DOCKER_COMMAND=(
-			/bin/bash -c "./ci/travis_run_docker.sh"  
+			/bin/bash -c "./ci/travis_run_docker.sh"
 			)
 	export DOCKER_CACHE_VARS=(
+			-v
+			"${HOME}/.cargo:/home/imageflow/host_cargo"
 	)
 	DOCKER_INVOCATION=(docker run "--rm")
 
@@ -379,12 +391,13 @@ else
 			DOCKER_INVOCATION=(docker run "--interactive" "$DOCKER_TTY_FLAG" "--rm")
 		fi
 
-		
+
 	fi
 	#echo "SIM_DOCKER_CACHE_VARS ${SIM_DOCKER_CACHE_VARS[*]}"
-
+	echo "PWD=${PWD}"
+	ls "$TRAVIS_BUILD_DIR/ci/travis_run_docker.sh"
 	set -x
-	"${DOCKER_INVOCATION[@]}" -v "${TRAVIS_BUILD_DIR}:/home/conan/imageflow" "${DOCKER_CACHE_VARS[@]}" "${DOCKER_ENV_VARS[@]}" "${DOCKER_IMAGE}" "${DOCKER_COMMAND[@]}" 
+	"${DOCKER_INVOCATION[@]}" -w "/home/imageflow/imageflow" -v "${TRAVIS_BUILD_DIR}:/home/imageflow/imageflow" "${DOCKER_CACHE_VARS[@]}" "${DOCKER_ENV_VARS[@]}" "${DOCKER_IMAGE}" "${DOCKER_COMMAND[@]}"
 	set +x
 fi
 if [[ "$SIM_CI" != 'True' ]]; then
@@ -392,9 +405,8 @@ if [[ "$SIM_CI" != 'True' ]]; then
 		# We always cleanup after a tagged release; no point in wasting cache space
 		sudo rm -rf ./target || sudo rm -rf ./target || true
 		sudo rm -rf ./c_components/build || sudo rm -rf ./c_components/build || true
-		sudo rm -rf ~/.conan || sudo rm -rf ~/.conan || true
 		sudo rm -rf ~/.cargo || sudo rm -rf ~/.cargo || true
-	fi 
+	fi
 
 	# Don't let the cache become polluted by a build profile we aren't doing
 	if [[ "$BUILD_RELEASE" == "False" ]]; then
@@ -406,24 +418,31 @@ if [[ "$SIM_CI" != 'True' ]]; then
 fi
 
 if [[ "$DELETE_UPLOAD_FOLDER" == 'True' ]]; then
-	echo_maybe -e "\nRemvoing all files scheduled for upload to s3\n\n"
+	echo_maybe -e "\nRemoving all files scheduled for upload to s3\n\n"
 	sudo rm -rf ./artifacts/upload || sudo rm -rf ./artifacts/upload || true
 	mkdir -p ./artifacts/upload || true
 else
 
 	if [ -d "./artifacts/nuget" ]; then
-		(cd ./artifacts/nuget
-			for i in *.nupkg; do
-				[ -f "$i" ] || break
-				echo -e "\nUploading $i to NuGet.org\n"Rn
-				# Upload each package
-				#dotnet nuget push "$i" --api-key "${NUGET_API_KEY}" -s "nuget.org"
-				#dotnet nuget push "$NUGET_TEST_PACKAGE" --api-key "${NUGET_API_KEY}" -s "nuget.org"
 
-				#curl -L "https://www.nuget.org/api/v2/package" -H "X-NuGet-ApiKey: ${NUGET_API_KEY}" -H "X-NuGet-Client-Version: 4.1.0" -A "NuGet Command Line/3.4.4.1321 (Unix 4.4.0.92)" --upload-file "$NUGET_TEST_PACKAGE"
+      (cd ./artifacts/nuget
+        for i in *.nupkg; do
+          [ -f "$i" ] || break
 
-				curl -L "https://www.nuget.org/api/v2/package" -H "X-NuGet-ApiKey: ${NUGET_API_KEY}" -H "X-NuGet-Client-Version: 4.1.0" -A "NuGet Command Line/3.4.4.1321 (Unix 4.4.0.92)" --upload-file "$i"
-			done
-		)
+          # Upload each package
+          #dotnet nuget push "$i" --api-key "${NUGET_API_KEY}" -s "nuget.org"
+          #dotnet nuget push "$NUGET_TEST_PACKAGE" --api-key "${NUGET_API_KEY}" -s "nuget.org"
+
+          #curl -L "https://www.nuget.org/api/v2/package" -H "X-NuGet-ApiKey: ${NUGET_API_KEY}" -H "X-NuGet-Client-Version: 4.1.0" -A "NuGet Command Line/3.4.4.1321 (Unix 4.4.0.92)" --upload-file "$NUGET_TEST_PACKAGE"
+          if [[ -n "$NUGET_API_KEY" ]]; then
+            echo -e "\nUploading $i to NuGet.org\n"Rn
+            curl -L "https://www.nuget.org/api/v2/package" -H "X-NuGet-ApiKey: ${NUGET_API_KEY}" -H "X-NuGet-Client-Version: 4.1.0" -A "NuGet Command Line/3.4.4.1321 (Unix 4.4.0.92)" --upload-file "$i" --fail
+          else
+		        echo "NUGET_API_KEY not defined ... skipping nuget upload"
+		      fi
+        done
+		  )
+
+
 	fi
 fi

@@ -2,7 +2,6 @@ Add server JSON endpoint
 
 Reserved endpoints for fully encoded arbitrary requests, though, where we can pass through auth info to the upstream gateway
 
-
 HTTP caching at build layer
 
 maybe move imageflow_abi header gen to a test? probably adds to build time.
@@ -11,16 +10,6 @@ Add security policies
 
 
 Add server configuration via TOML (or JSON API?) We need a form of persistence that is lightweight and not always tied to the filesystem.
-
-
-Port https://github.com/Mysticial/FeatureDetector to Rust - OR - distribute as separate tool?
-
-
-
-
-
-
-
 
 
 ///img hash https://github.com/abonander/img_hash is interesting
@@ -56,7 +45,7 @@ We store the commit ID of imageflow_tool used alone in a file named "imageflow_c
 We upload to S3, and have CreateObject trigger an AWS lambda.
 AWS lambda fetches package, then fetches the Imageflow build for that commit ID and a matching glibc. We run that
 imageflow_tool in --troubleshoot-package mode against the uploaded file, and let it augment the report on a different OS.
-We then ship that report to nathanael.jones@gmail.com, or some other system, and upload the
+We then ship that report to lilith@imazen.io, or some other system, and upload the
 complete pacakge (perhaps in interactive HTML form) to Amazon S3 again.
 
 If we want to store image output for multiple experiments, we should rename them to their checksum and edit the experiment JSON.
@@ -205,10 +194,10 @@ https://vision.arc.nasa.gov/publications/publications.html#compression
 - [x] Whitespace detection/cropping (no external API yet)
 - [x] Ideal scaling-integrated sharpening for subpixel accuracy.
 - [x] Automatic white balance correction.  (no external API yet)
-- [ ] Time-constant guassian approximation (%97) blur (1 bug remaining)
+- [ ] Time-constant gaussian approximation (%97) blur (1 bug remaining)
 - [ ] Improve contrast/saturation/luma adjustment ergonomics
 - [x] Integrate libjpeg-turbo (read/write)
-- [x] Create correct and ooptimized IDCT downscaling for libjpeg-turbo (linear light, robidoux filter)
+- [x] Create correct and optimized IDCT downscaling for libjpeg-turbo (linear light, robidoux filter)
 - [x] Integrate libpng (read/write) (32-bit only)
 - [ ] Integrate Rust gif codec
 - [ ] Support animated gifs
@@ -231,7 +220,7 @@ https://vision.arc.nasa.gov/publications/publications.html#compression
 - [x] Validate basic functionality via simple ruby REST [RIAPI](http://riapi.org) server to wrap libimageflow
 - [x] Design correct error handling protocol so all APIs report detailed stacktrace w/ line numbers and useful error messages for all API surfaces. 
 - [x] Expose flexible I/O interface so a variety if I/O types can be cleanly supported from host languages (I.e, .NET Stream, FILE *, membuffer, circular buffer, etc)
-- [x] Replace direct graph maniupulation with JSON API
+- [x] Replace direct graph manipulation with JSON API
 - [ ] Finish API design and test coverage for image composition, whitespace detection/cropping, sharpening, blurring, contrast/saturation, and white balance (algorithms already complete or well defined). 
 - [ ] Create plugin interface for codecs 
 - [ ] Create documentation
@@ -240,17 +229,7 @@ https://vision.arc.nasa.gov/publications/publications.html#compression
 
 ### Refactorings
 
-
-- [x] Begin porting to Rust. 
-- [x] Explicit control flow in all C code.
-- [x] Full debugging information by recording errors at failure point, then appending the stacktrace (C only)
-- [x] Give user complete control over allocation method and timing.
-- [x] Use [Conan.io](http://conan.io) for package management and builds to eliminate dependency hell.
-- [x] Make codecs and node definitions uniform
-- [x] Establish automated code formatting rules in .clang-format
-- [ ] Replace giflib
 - [ ] replace zlib with zlib-ng
-- [ ] Replace ruby prototype of libimageflow-server with a Rust version
 - [ ] Look into replacing parts of the jpeg codec with concurrent alternatives. 
 - [ ] Add fuzz testing for JSON and I/O 
 - [ ] Find cleaner way to use SSE2 constructs with scalar fallbacks, it is messy in a few areas.

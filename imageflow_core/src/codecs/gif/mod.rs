@@ -1,13 +1,12 @@
 use std;
-use for_other_imageflow_crates::preludes::external_without_std::*;
-use ffi;
-use ::{Context, CError,  Result, JsonResponse};
-use ffi::CodecInstance;
-use ffi::BitmapBgra;
+use crate::for_other_imageflow_crates::preludes::external_without_std::*;
+use crate::ffi;
+use crate::{Context, CError,  Result, JsonResponse};
+use crate::ffi::BitmapBgra;
 use imageflow_types::collections::AddRemoveSet;
-use io::IoProxy;
+use crate::io::IoProxy;
 use uuid::Uuid;
-use imageflow_types::IoDirection;
+use imageflow_types::{IoDirection, PixelLayout};
 use super::*;
 use std::any::Any;
 mod disposal;
@@ -16,11 +15,12 @@ mod screen;
 mod bgra;
 use self::bgra::BGRA8;
 use self::screen::Screen;
-use gif::Frame;
-use gif::SetParameter;
+use crate::gif::Frame;
+use crate::gif::SetParameter;
 use std::rc::Rc;
-use io::IoProxyProxy;
-use io::IoProxyRef;
+use crate::io::IoProxyProxy;
+use crate::io::IoProxyRef;
+use crate::graphics::bitmaps::{BitmapKey, ColorSpace, BitmapCompositing};
 
 pub struct GifDecoder{
     reader: ::gif::Reader<IoProxy>,
@@ -59,22 +59,37 @@ impl GifDecoder {
     }
 
 
-    fn create_bitmap_from_screen(&self, c: &Context) -> Result<*mut BitmapBgra>{
+    fn create_bitmap_from_screen(&self, c: &Context) -> Result<BitmapKey>{
         // Create output bitmap and copy to it
         unsafe {
             let w = self.screen.width;
             let h = self.screen.height;
-            let copy = ffi::flow_bitmap_bgra_create(c.flow_c(), w as i32, h as i32, false, ffi::PixelFormat::Bgra32);
-            if copy.is_null() {
-                cerror!(c).panic();
-            }
-            let copy_mut = &mut *copy;
+
+            let mut bitmaps = c.borrow_bitmaps_mut()
+                .map_err(|e| e.at(here!()))?;
+
+            let bitmap_key = bitmaps.create_bitmap_u8(w as u32,
+                                        h as u32,
+                                    PixelLayout::BGRA,
+                                    false,
+                                    true,
+                                    ColorSpace::StandardRGB,
+                                    BitmapCompositing::ReplaceSelf)
+                .map_err(|e| e.at(here!()))?;
+
+            let mut bitmap = bitmaps
+                .try_borrow_mut(bitmap_key)
+                .map_err(|e| e.at(here!()))?;
+
+            let mut copy = bitmap.get_window_u8().unwrap()
+                                .to_bitmap_bgra()?;
+            let copy_mut = &mut copy;
 
             for row in 0..h{
                 let to_row: &mut [BGRA8] = std::slice::from_raw_parts_mut(copy_mut.pixels.offset(copy_mut.stride as isize * row as isize) as *mut BGRA8, w as usize);
                 to_row.copy_from_slice(&self.screen.pixels[row * w..(row + 1) * w]);
             }
-            Ok(copy)
+            Ok(bitmap_key)
         }
     }
     pub fn current_frame(&self) -> Option<&Frame>{
@@ -93,8 +108,10 @@ impl Decoder for GifDecoder {
         Ok(())
     }
 
-
-    fn get_image_info(&mut self, c: &Context) -> Result<s::ImageInfo> {
+    fn get_scaled_image_info(&mut self, c: &Context) -> Result<s::ImageInfo>{
+        self.get_unscaled_image_info(c)
+    }
+    fn get_unscaled_image_info(&mut self, c: &Context) -> Result<s::ImageInfo> {
         Ok(s::ImageInfo {
             frame_decodes_into: s::PixelFormat::Bgra32,
             image_width: i32::from(self.reader.width()),
@@ -115,7 +132,7 @@ impl Decoder for GifDecoder {
         Ok(())
     }
 
-    fn read_frame(&mut self, c: &Context) -> Result<*mut BitmapBgra> {
+    fn read_frame(&mut self, c: &Context) -> Result<BitmapKey> {
         // Ensure next_frame is present (only called for first frame)
         if self.next_frame.is_none() {
             self.read_next_frame_info().map_err(|e| e.at(here!()))?;
@@ -125,7 +142,7 @@ impl Decoder for GifDecoder {
             // Grab a reference
             let frame = self.next_frame.as_ref().ok_or_else(|| nerror!(ErrorKind::InvalidOperation, "read_frame was called without a frame available"))?;
 
-            //Prepare our resuable buffer
+            //Prepare our reusable buffer
             let buf_size = self.reader.width() as usize * self.reader.height() as usize;
 
             let buf_mut = self.buffer.get_or_insert_with(|| vec![0; buf_size]);
@@ -150,13 +167,13 @@ impl Decoder for GifDecoder {
     fn has_more_frames(&mut self) -> Result<bool> {
         Ok(self.next_frame.is_some())
     }
-    fn as_any(&self) -> &Any {
-        self as &Any
+    fn as_any(&self) -> &dyn Any {
+        self as &dyn Any
     }
 }
 
 pub trait EasyEncoder{
-    fn write_frame(&mut self, w: &mut Write, c: &Context, frame: &mut BitmapBgra) -> Result<s::EncodeResult>;
+    fn write_frame(&mut self, w: &mut dyn Write, c: &Context, bitmap_key: BitmapKey) -> Result<s::EncodeResult>;
 }
 
 
@@ -183,10 +200,11 @@ impl<T> EncoderAdapter<T>  where T: EasyEncoder{
 }
 
 impl<T> Encoder for EncoderAdapter<T>  where T: EasyEncoder{
-    fn write_frame(&mut self, c: &Context, preset: &s::EncoderPreset, frame: &mut BitmapBgra,  decoder_io_ids: &[i32]) -> Result<s::EncodeResult> {
+    fn write_frame(&mut self, c: &Context, preset: &s::EncoderPreset, bitmap_key: BitmapKey,  decoder_io_ids: &[i32]) -> Result<s::EncodeResult> {
         let io_proxy = IoProxyProxy(self.io_ref.clone());
 
-        self.encoder.write_frame(&mut IoProxyProxy(self.io_ref.clone()), c,  frame).map_err(|e|e.at(here!())).and_then(|mut r| {
+        self.encoder.write_frame(&mut IoProxyProxy(self.io_ref.clone()), c,  bitmap_key)
+            .map_err(|e|e.at(here!())).and_then(|mut r| {
             r.io_id = self.io_id;
             match r.bytes {
                 s::ResultBytes::ByteArray(vec) => {
@@ -212,7 +230,16 @@ pub struct GifEncoder{
 }
 
 impl GifEncoder{
-    pub(crate) fn create(c: &Context, preset: &s::EncoderPreset, io: IoProxy, first_frame: &BitmapBgra) -> Result<GifEncoder>{
+    pub(crate) fn create(c: &Context, preset: &s::EncoderPreset, io: IoProxy, first_frame_key: BitmapKey) -> Result<GifEncoder>{
+        let bitmaps = c.borrow_bitmaps()
+            .map_err(|e| e.at(here!()))?;
+
+        let bitmap = bitmaps.try_borrow_mut(first_frame_key)
+            .map_err(|e| e.at(here!()))?;
+
+        if !c.enabled_codecs.encoders.contains(&NamedEncoders::GifEncoder){
+            return Err(nerror!(ErrorKind::CodecDisabledError, "The gif encoder has been disabled"));
+        }
         let io_id = io.io_id();
         let io_ref = Rc::new(RefCell::new(io));
 
@@ -220,14 +247,14 @@ impl GifEncoder{
             io_id,
             io_ref: io_ref.clone(),
             // Global color table??
-            encoder: ::gif::Encoder::new(IoProxyProxy(io_ref), first_frame.w as u16, first_frame.h as u16, &[]).map_err(|e| FlowError::from_encoder(e).at(here!()))?,
+            encoder: ::gif::Encoder::new(IoProxyProxy(io_ref), bitmap.w() as u16, bitmap.h() as u16, &[]).map_err(|e| FlowError::from_encoder(e).at(here!()))?,
             frame_ix: 0
         })
     }
 }
 
 impl Encoder for GifEncoder{
-    fn write_frame(&mut self, c: &Context, preset: &s::EncoderPreset, frame: &mut BitmapBgra, decoder_io_ids: &[i32]) -> Result<s::EncodeResult> {
+    fn write_frame(&mut self, c: &Context, preset: &s::EncoderPreset, bitmap_key: BitmapKey, decoder_io_ids: &[i32]) -> Result<s::EncodeResult> {
 
         let mut decoded_frame = None;
         let mut repeat = None;
@@ -247,13 +274,24 @@ impl Encoder for GifEncoder{
 //        eprintln!("decoders: {:?}, found_frame: {}", decoder_io_ids, decoded_frame.is_some() );
 
         unsafe {
+
+            let bitmaps = c.borrow_bitmaps()
+                .map_err(|e| e.at(here!()))?;
+
+            let mut bitmap = bitmaps.try_borrow_mut(bitmap_key)
+                .map_err(|e| e.at(here!()))?;
+
+            let mut frame = bitmap.get_window_u8()
+                .ok_or_else(|| nerror!(ErrorKind::InvalidBitmapType))?
+                .to_bitmap_bgra().map_err(|e| e.at(here!()))?;
+
             let mut pixels = Vec::new();
             pixels.extend_from_slice(frame.pixels_slice_mut().expect("Frame must have pixel buffer"));
 
             let mut f = match frame.fmt {
-                ::ffi::PixelFormat::Bgr24 => Ok(from_bgr_with_stride(frame.w as u16, frame.h as u16, &pixels, frame.stride as usize)),
-                ::ffi::PixelFormat::Bgra32 => Ok(from_bgra_with_stride(frame.w as u16, frame.h as u16, &mut pixels, frame.stride as usize)),
-                ::ffi::PixelFormat::Bgr32 => Ok(from_bgrx_with_stride(frame.w as u16, frame.h as u16, &mut pixels, frame.stride as usize)),
+                crate::ffi::PixelFormat::Bgr24 => Ok(from_bgr_with_stride(frame.w as u16, frame.h as u16, &pixels, frame.stride as usize)),
+                crate::ffi::PixelFormat::Bgra32 => Ok(from_bgra_with_stride(frame.w as u16, frame.h as u16, &mut pixels, frame.stride as usize)),
+                crate::ffi::PixelFormat::Bgr32 => Ok(from_bgrx_with_stride(frame.w as u16, frame.h as u16, &mut pixels, frame.stride as usize)),
                 other =>  Err(nerror!(ErrorKind::InvalidArgument, "PixelFormat {:?} not supported for gif encoding", frame.fmt))
             }?;
 
@@ -311,6 +349,12 @@ pub fn from_bgra_with_stride(width: u16, height: u16, pixels: &mut [u8], stride:
     let mut without_padding = remove_padding(width, pixels, stride);
     for pix in without_padding.chunks_mut(4) {
         pix.swap(0,2);
+        if pix[3] < 0x10{
+            pix[0] = 0;
+            pix[1] = 0;
+            pix[2] = 0;
+            pix[3] = 0;
+        }
     }
     ::gif::Frame::from_rgba(width, height, &mut without_padding)
 }

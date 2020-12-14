@@ -12,7 +12,7 @@ extern crate imgref;
 
 use std::ffi::CString;
 use std::path::Path;
-use imageflow_core::{Context};
+use imageflow_core::{Context, FlowError, ErrorKind};
 
 use imageflow_core::ffi::BitmapBgra;
 use std::collections::BTreeMap;
@@ -23,6 +23,10 @@ use std;
 use imageflow_core;
 
 use std::sync::RwLock;
+use imageflow_types::{ Node, ResponsePayload};
+use std::time::Duration;
+use imageflow_core::BitmapKey;
+use slotmap::Key;
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub enum ChecksumMatch {
@@ -31,21 +35,110 @@ pub enum ChecksumMatch {
     NewStored,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum IoTestEnum {
+    // #[serde(rename="bytes_hex")]
+    // BytesHex(String),
+    // #[serde(rename="base_64")]
+    // Base64(String),
+    ByteArray(Vec<u8>),
+    // #[serde(rename="file")]
+    // Filename(String),
+    OutputBuffer,
+    // #[serde(rename="output_base_64")]
+    // OutputBase64,
+    // /// To be replaced before execution
+    // #[serde(rename="placeholder")]
+    //Placeholder,
+    Url(String)
+}
+
+pub struct IoTestTranslator;
+impl IoTestTranslator {
+    pub fn add(&self,c: &mut Context,
+           io_id: i32,
+           io_enum: IoTestEnum)
+           -> Result<(), FlowError> {
+        match io_enum {
+            IoTestEnum::ByteArray(vec) => {
+                c.add_copied_input_buffer(io_id, &vec).map_err(|e| e.at(here!()))
+            }
+            // IoTestEnum::Base64(b64_string) => {
+            //     //TODO: test and disable slow methods
+            //     let bytes = b64_string.as_str().from_base64()
+            //         .map_err(|e| nerror!(ErrorKind::InvalidArgument, "base64: {}", e))?;
+            //     c.add_copied_input_buffer(io_id, &bytes).map_err(|e| e.at(here!()))
+            // }
+            // IoTestEnum::BytesHex(hex_string) => {
+            //     let bytes = hex_string.as_str().from_hex().unwrap();
+            //     c.add_copied_input_buffer(io_id, &bytes).map_err(|e| e.at(here!()))
+            // }
+            // IoTestEnum::Filename(path) => {
+            //
+            //     c.add_file(io_id, dir, &path )
+            // }
+            IoTestEnum::Url(url) => {
+                let mut retry_count = 3;
+                let mut retry_wait = 100;
+                loop {
+                    match ::imageflow_http_helpers::fetch_bytes(&url)
+                        .map_err(|e| nerror!(ErrorKind::FetchError, "{}: {}", url, e)){
+                        Err(e) => {
+                            if retry_count > 0{
+                                retry_count -= 1;
+                                std::thread::sleep(Duration::from_millis( retry_wait));
+                                retry_wait *= 5;
+                            }else{
+                                return Err(e)
+                            }
+                        }
+                        Ok(bytes) => {
+                            return c.add_input_vector(io_id, bytes).map_err(|e| e.at(here!()))
+                        }
+                    }
+                }
+            },
+
+            IoTestEnum::OutputBuffer  => {
+                c.add_output_buffer(io_id).map_err(|e| e.at(here!()))
+            },
+            // IoTestEnum::Placeholder => {
+            //     Err(nerror!(ErrorKind::GraphInvalid, "Io Placeholder {} was never substituted", io_id))
+            // }
+        }
+    }
+
+
+}
+
+pub fn build_steps(context: &mut Context, steps: &[s::Node], io: Vec<IoTestEnum>, security: Option<imageflow_types::ExecutionSecurity>,  debug: bool) -> Result<ResponsePayload, FlowError>{
+
+    for (ix, val) in io.into_iter().enumerate() {
+        IoTestTranslator{}.add(context, ix as i32, val)?;
+    }
+    let build = s::Execute001{
+        security,
+        graph_recording: default_graph_recording(debug),
+        framewise: s::Framewise::Steps(steps.to_vec())
+    };
+    if debug {
+        println!("{}", serde_json::to_string_pretty(&build).unwrap());
+    }
+
+    context.execute_1(build)
+}
+
 /// Executes the given steps (adding a frame buffer container to the end of them).
 /// Returns the width and height of the resulting frame.
 /// Steps must be open-ended - they cannot be terminated with an encoder.
-pub fn get_result_dimensions(steps: &[s::Node], io: Vec<s::IoObject>, debug: bool) -> (u32, u32) {
+pub fn get_result_dimensions(steps: &[s::Node], io: Vec<IoTestEnum>, debug: bool) -> (u32, u32) {
     let mut bit = BitmapBgraContainer::empty();
     let mut steps = steps.to_vec();
     steps.push(unsafe { bit.get_node() });
 
-    let build = s::Build001{
-        builder_config: Some(default_build_config(debug)),
-        io,
-        framewise: s::Framewise::Steps(steps)
-    };
     let mut context = Context::create().unwrap();
-    let result = context.build_1(build).unwrap();
+
+    let result = build_steps(&mut context, &steps, io, None, debug).unwrap();
 
     if let Some(b) = unsafe { bit.bitmap(&context) } {
         (b.w, b.h)
@@ -55,40 +148,23 @@ pub fn get_result_dimensions(steps: &[s::Node], io: Vec<s::IoObject>, debug: boo
 }
 
 /// Just validates that no errors are thrown during job execution
-pub fn smoke_test(input: Option<s::IoEnum>, output: Option<s::IoEnum>,  debug: bool, steps: Vec<s::Node>){
+pub fn smoke_test(input: Option<IoTestEnum>, output: Option<IoTestEnum>, security: Option<imageflow_types::ExecutionSecurity>, debug: bool, steps: Vec<s::Node>) -> Result<s::ResponsePayload, imageflow_core::FlowError>{
     let mut io_list = Vec::new();
     if input.is_some() {
-        io_list.push(s::IoObject {
-            io_id: 0,
-            direction: s::IoDirection::In,
-
-            io: input.unwrap()
-        });
+        io_list.push(input.unwrap());
     }
     if output.is_some() {
-        io_list.push(s::IoObject {
-            io_id: 1,
-            direction: s::IoDirection::Out,
-
-            io: output.unwrap()
-        });
+        io_list.push(output.unwrap());
     }
-    let build = s::Build001{
-        builder_config: Some(default_build_config(debug)),
-        io: io_list,
-        framewise: s::Framewise::Steps(steps)
-    };
     let mut context = Context::create().unwrap();
-    let _ = context.build_1(build).unwrap();
-
+    build_steps(&mut context, &steps, io_list, security, debug)
 }
 
 
 /// A context for getting/storing frames and frame checksums by test name.
 /// Currently has read-only support for remote storage.
 /// TODO: Add upload support; it's very annoying to do it manually
-pub struct ChecksumCtx<'a>{
-    c: &'a Context,
+pub struct ChecksumCtx{
     checksum_file: PathBuf,
     url_list_file: PathBuf,
     visuals_dir: PathBuf,
@@ -102,14 +178,13 @@ lazy_static! {
     static ref CHECKSUM_FILE: RwLock<()> = RwLock::new(());
 }
 
-impl<'a> ChecksumCtx<'a>{
+impl ChecksumCtx{
 
     /// A checksum context configured for tests/visuals/*
-    pub fn visuals(c: &Context) -> ChecksumCtx{
+    pub fn visuals() -> ChecksumCtx{
         let visuals = Path::new(env!("CARGO_MANIFEST_DIR")).join(Path::new("tests")).join(Path::new("visuals"));
         std::fs::create_dir_all(&visuals).unwrap();
         ChecksumCtx {
-            c,
             visuals_dir: visuals.clone(),
             cache_dir: visuals.join(Path::new("cache")),
             create_if_missing: true,
@@ -198,21 +273,21 @@ impl<'a> ChecksumCtx<'a>{
             println!("{} (trusted) exists", checksum);
         }else{
             println!("Fetching {} to {:?}", &source_url, &dest_path);
-            let bytes = hlp::fetching::fetch_bytes(&source_url).expect("Did you forget to upload {} to s3?");
+            let bytes = ::imageflow_http_helpers::fetch_bytes(&source_url).expect("Did you forget to upload {} to s3?");
             File::create(&dest_path).unwrap().write_all(bytes.as_ref()).unwrap();
         }
     }
 
     /// Load the given image from disk (and download it if it's not on disk)
     /// The bitmap will be destroyed when the returned Context goes out of scope
-    pub fn load_image(&self, checksum: &str) -> (Box<Context>, *mut BitmapBgra) {
+    pub fn load_image(&self, checksum: &str) -> (Box<Context>, BitmapKey) {
         self.fetch_image(checksum);
 
         let mut c = Context::create().unwrap();
         let path = self.image_path_string(checksum);
         c.add_file(0, s::IoDirection::In, &path).unwrap();
 
-        let image =  decode_image(&mut *c, 0) as *mut BitmapBgra;
+        let image =  decode_image(&mut *c, 0);
         (c, image)
     }
 
@@ -221,12 +296,14 @@ impl<'a> ChecksumCtx<'a>{
     pub fn save_frame(&self, bit: &BitmapBgra, checksum: &str){
         let dest_path = self.image_path(&checksum);
         if !dest_path.exists(){
-            let dest_cpath = self.image_path_cstring(&checksum);
-            println!("Writing {:?}", &dest_path);
+            let path_str = dest_path.to_str();
+            if let Some(path) = path_str{
+                println!("Writing {}", &path);
+            }else {
+                println!("Writing {:#?}", &dest_path);
+            }
             unsafe {
-                if !::imageflow_core::ffi::flow_bitmap_bgra_save_png(self.c.flow_c(), bit as *const BitmapBgra, dest_cpath.as_ptr()){
-                    cerror!(self.c).panic();
-                }
+                imageflow_core::helpers::write_png(dest_path, bit).unwrap();
             }
         }
     }
@@ -272,13 +349,22 @@ impl<'a> ChecksumCtx<'a>{
     ///
     /// if there is no trusted checksum, create_if_missing is set, then
     /// the checksum will be stored, and the function will return true.
-    pub fn bitmap_matches(&self, bitmap: &mut BitmapBgra, name: &str) -> (ChecksumMatch, String){
+    pub fn bitmap_matches(&self, c: &Context, bitmap_key: BitmapKey, name: &str) -> (ChecksumMatch, String){
+
+        let mut bitmap= unsafe {
+            c.borrow_bitmaps().unwrap()
+                .try_borrow_mut(bitmap_key).unwrap()
+                .get_window_u8().unwrap()
+                .to_bitmap_bgra().unwrap()
+        };
+
+
         bitmap.normalize_alpha().unwrap();
 
-        let actual = Self::checksum_bitmap(bitmap);
+        let actual = Self::checksum_bitmap(&bitmap);
         //println!("actual = {}", &actual);
         // Always write a copy if it doesn't exist
-        self.save_frame(bitmap, &actual);
+        self.save_frame(&bitmap, &actual);
 
         self.exact_match(actual, name)
     }
@@ -312,7 +398,11 @@ impl<'a> ChecksumCtx<'a>{
             if trusted == actual_checksum{
                 (ChecksumMatch::Match, trusted)
             }else{
-                println!("====================\n{}\nThe stored checksum {} differs from the actual_checksum one {}", name, &trusted, &actual_checksum);
+                println!("====================\n{}\nThe stored checksum {} differs from the actual_checksum one {}\nTrusted: {}\nActual: {}\n",
+                         name, &trusted,
+                         &actual_checksum,
+                         self.image_path(&trusted).to_str().unwrap(),
+                         self.image_path(&actual_checksum).to_str().unwrap());
                 (ChecksumMatch::Mismatch, trusted)
             }
         }else{
@@ -329,10 +419,11 @@ impl<'a> ChecksumCtx<'a>{
     // TODO: implement uploader
 }
 
-pub fn decode_image<'a>(c: &'a mut Context, io_id: i32) ->  &'a mut BitmapBgra {
+pub fn decode_image(c: &mut Context, io_id: i32) -> BitmapKey {
     let mut bit = BitmapBgraContainer::empty();
     let _result = c.execute_1(s::Execute001 {
         graph_recording: None,
+        security: None,
         framewise: s::Framewise::Steps(vec![
             s::Node::Decode {
                 io_id,
@@ -341,24 +432,21 @@ pub fn decode_image<'a>(c: &'a mut Context, io_id: i32) ->  &'a mut BitmapBgra {
             unsafe { bit.get_node() }
         ])
     }).unwrap();
-    unsafe{ bit.bitmap(c).unwrap() }
+    unsafe{ bit.bitmap_key(c).unwrap() }
 }
 
-pub fn decode_input<'a>(c: &'a mut Context, input: s::IoEnum) ->  &'a mut BitmapBgra {
+pub fn decode_input(c: &mut Context, input: IoTestEnum) -> BitmapKey {
     let mut bit = BitmapBgraContainer::empty();
-    let _result = c.build_1(s::Build001 {
-        builder_config: None,
-        io: vec![input.into_input(0)
-        ],
-        framewise: s::Framewise::Steps(vec![
-            s::Node::Decode {
-                io_id: 0,
-                commands: None
-            },
-            unsafe { bit.get_node() }
-        ])
-    }).unwrap();
-    unsafe { bit.bitmap(c).unwrap() }
+
+    let _result = build_steps(c, &vec![
+        s::Node::Decode {
+            io_id: 0,
+            commands: None
+        },
+        unsafe { bit.get_node() }
+    ], vec![input], None, false).unwrap();
+
+    unsafe { bit.bitmap_key(c).unwrap() }
 }
 
 
@@ -397,7 +485,6 @@ fn diff_bitmap_bytes(a: &BitmapBgra, b: &BitmapBgra) -> (i64,i64){
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Similarity{
-    Exact,
     AllowOffByOneBytesCount(i64),
     AllowOffByOneBytesRatio(f32),
     AllowDssimMatch(f64, f64)
@@ -409,10 +496,9 @@ impl Similarity{
         let allowed_off_by_one_bytes: i64 = match *self {
             Similarity::AllowOffByOneBytesCount(v) => v,
             Similarity::AllowOffByOneBytesRatio(ratio) => (ratio * len as f32) as i64,
-            Similarity::Exact => 0i64,
             Similarity::AllowDssimMatch(..) => return None,
         };
-eprintln!("{} {} {} {:?}", count, delta, len, self);
+        eprintln!("{} {} {} {:?}", count, delta, len, self);
 
         if count != delta {
             return Some(format!("Bitmaps mismatched, and not just off-by-one errors! count={} delta={}", count, delta));
@@ -433,19 +519,19 @@ pub struct Constraints{
 }
 
 pub enum ResultKind<'a>{
-    Bitmap(&'a mut BitmapBgra),
+    Bitmap{ context: &'a Context, key: BitmapKey},
     Bytes(&'a [u8])
 }
 impl<'a> ResultKind<'a>{
     fn exact_match_verbose(&mut self, c: &ChecksumCtx, name: &str) -> (ChecksumMatch, String){
         match *self{
-            ResultKind::Bitmap(ref mut b) => c.bitmap_matches(*b, name),
+            ResultKind::Bitmap{ context, key} => c.bitmap_matches(context,key, name),
             ResultKind::Bytes(ref b) => c.bytes_match(b, name)
         }
     }
 }
 
-fn get_imgref_bgra32<'a>(b: &'a mut BitmapBgra) -> imgref::ImgVec<rgb::RGBA<f32>>{
+fn get_imgref_bgra32(b: &mut BitmapBgra) -> imgref::ImgVec<rgb::RGBA<f32>> {
     use self::dssim::*;
 
     match b.fmt {
@@ -470,68 +556,98 @@ fn get_imgref_bgra32<'a>(b: &'a mut BitmapBgra) -> imgref::ImgVec<rgb::RGBA<f32>
 }
 
 /// Compare two bgra32 or bgr32 frames using the given similarity requirements
-pub fn compare_bitmaps(_c: &ChecksumCtx,  actual: &mut BitmapBgra, expected: &mut BitmapBgra, require: Similarity, panic: bool) -> bool{
-    let (count, delta) = diff_bitmap_bytes(actual, expected);
+pub fn compare_bitmaps(_c: &ChecksumCtx, actual_context: &Context, actual_key: BitmapKey,
+                       expected_context: &Context,
+                       expected_key: BitmapKey, require: Similarity, panic: bool) -> bool{
 
-    if count == 0 {
-        return true;
-    }
+    unsafe {
+        let mut actual_bgra = actual_context.borrow_bitmaps().unwrap()
+            .try_borrow_mut(actual_key).unwrap()
+            .get_window_u8().unwrap()
+            .to_bitmap_bgra().unwrap();
 
-    if let Similarity::AllowDssimMatch(minval, maxval) = require {
-        let actual_ref = get_imgref_bgra32(actual);
-        let expected_ref = get_imgref_bgra32(expected);
-        let mut d = dssim::new();
+        let actual= &mut actual_bgra;
 
-        let actual_img = d.create_image(&actual_ref).unwrap();
-        let expected_img = d.create_image(&expected_ref).unwrap();
+        let mut expected_bgra = expected_context.borrow_bitmaps().unwrap()
+            .try_borrow_mut(expected_key).unwrap()
+            .get_window_u8().unwrap()
+            .to_bitmap_bgra().unwrap();
 
-        let (dssim, _) = d.compare(&expected_img, actual_img);
+        let expected = &mut expected_bgra;
 
-        let failure = if dssim > maxval {
-           Some(format!("The dssim {} is greater than the permitted value {}", dssim, maxval))
-        } else if dssim < minval {
-            Some(format!("The dssim {} is lower than expected minimum value {}", dssim, minval))
-        } else {
-            None
-        };
+        let (count, delta) = diff_bitmap_bytes(actual, expected);
 
-        if let Some(message) = failure {
-            if panic {
-                panic!("{}", message);
+        if count == 0 {
+            return true;
+        }
+
+        if let Similarity::AllowDssimMatch(minval, maxval) = require {
+            let actual_ref = get_imgref_bgra32(actual);
+            let expected_ref = get_imgref_bgra32(expected);
+            let d = dssim::new();
+
+            let actual_img = d.create_image(&actual_ref).unwrap();
+            let expected_img = d.create_image(&expected_ref).unwrap();
+
+            let (dssim, _) = d.compare(&expected_img, actual_img);
+
+            let failure = if dssim > maxval {
+                Some(format!("The dssim {} is greater than the permitted value {}", dssim, maxval))
+            } else if dssim < minval {
+                Some(format!("The dssim {} is lower than expected minimum value {}", dssim, minval))
             } else {
-                eprintln!("{}", message);
-                false
+                None
+            };
+
+            if let Some(message) = failure {
+                if panic {
+                    panic!("{}", message);
+                } else {
+                    eprintln!("{}", message);
+                    false
+                }
+            } else {
+                true
             }
         } else {
+            if let Some(message) = require.report_on_bytes(count, delta, actual.w as usize * actual.h as usize * actual.fmt.bytes()) {
+                if panic {
+                    panic!("{}", message);
+                } else {
+                    eprintln!("{}", message);
+                    return false;
+                }
+            }
             true
         }
-    } else {
-        if let Some(message) = require.report_on_bytes(count, delta, actual.w as usize * actual.h as usize * actual.fmt.bytes()){
-            if panic{
-                panic!("{}" ,message);
-            }else{
-                eprintln!("{}", message);
-                return false;
-            }
-        }
-        true
     }
 }
 
-/// Evalutates the given result against known truth, applying the given constraints
-pub fn compare_with<'a, 'b>(c: &ChecksumCtx, expected_checksum: &str, expected_bitmap : &'b mut BitmapBgra, result: ResultKind<'a>, require: Constraints, panic: bool) -> bool{
+/// Evaluates the given result against known truth, applying the given constraints
+pub fn compare_with<'a, 'b>(c: &ChecksumCtx, expected_checksum: &str, expected_context: &Context,  expected_bitmap_key: BitmapKey, result: ResultKind<'a>, require: Constraints, panic: bool) -> bool{
     if !check_size(&result, require.clone(), panic) {
         return false;
     }
 
 
     let mut image_context = Context::create().unwrap();
-    let actual_bitmap = match result {
-        ResultKind::Bitmap(actual_bitmap) => actual_bitmap,
-        ResultKind::Bytes(actual_bytes) => decode_input(&mut image_context, s::IoEnum::ByteArray(actual_bytes.to_vec()))
+    let (actual_context, actual_bitmap_key) = match result {
+        ResultKind::Bitmap{ context, key } => (context, key ),
+        ResultKind::Bytes(actual_bytes) => {
+            let key = decode_input(&mut image_context, IoTestEnum::ByteArray(actual_bytes.to_vec()));
+            (image_context.as_ref(), key)
+        }
     };
 
-    let result_checksum = ChecksumCtx::checksum_bitmap(actual_bitmap);
+
+
+    let result_checksum = unsafe {
+        let actual_bitmap = actual_context.borrow_bitmaps().unwrap()
+            .try_borrow_mut(actual_bitmap_key).unwrap()
+            .get_window_u8().unwrap().to_bitmap_bgra().unwrap();
+
+        ChecksumCtx::checksum_bitmap(&actual_bitmap)
+    };
 
 
 
@@ -539,11 +655,11 @@ pub fn compare_with<'a, 'b>(c: &ChecksumCtx, expected_checksum: &str, expected_b
     if result_checksum == expected_checksum {
         true
     } else{
-        compare_bitmaps(c, actual_bitmap, expected_bitmap, require.similarity, panic)
+        compare_bitmaps(c, actual_context, actual_bitmap_key, expected_context,expected_bitmap_key, require.similarity, panic)
     }
 }
 
-pub fn check_size<'a>( result: &ResultKind<'a>, require: Constraints, panic: bool) -> bool{
+pub fn check_size(result: &ResultKind, require: Constraints, panic: bool) -> bool{
     if let ResultKind::Bytes(ref actual_bytes) = *result {
         if actual_bytes.len() > require.max_file_size.unwrap_or(actual_bytes.len()) {
             let message = format!("Encoded size ({}) exceeds limit ({})", actual_bytes.len(), require.max_file_size.unwrap());
@@ -562,7 +678,7 @@ pub fn check_size<'a>( result: &ResultKind<'a>, require: Constraints, panic: boo
 
 
 
-/// Evalutates the given result against known truth, applying the given constraints
+/// Evaluates the given result against known truth, applying the given constraints
 pub fn evaluate_result<'a>(c: &ChecksumCtx, name: &str, mut result: ResultKind<'a>, require: Constraints, panic: bool) -> bool{
     let (exact, trusted) = result.exact_match_verbose(c, name);
 
@@ -575,26 +691,27 @@ pub fn evaluate_result<'a>(c: &ChecksumCtx, name: &str, mut result: ResultKind<'
     if exact == ChecksumMatch::Match {
         true
     } else {
-        let (expected_context, expected_bitmap) = c.load_image(&trusted);
+        let (expected_context, expected_bitmap_key) = c.load_image(&trusted);
         let mut image_context = Context::create().unwrap();
-        let actual_bitmap = match result {
-            ResultKind::Bitmap(actual_bitmap) => actual_bitmap,
+        let (actual_context, actual_bitmap_key) = match result {
+            ResultKind::Bitmap{ context, key } => (context, key),
             ResultKind::Bytes(actual_bytes) => {
                 image_context.add_input_bytes(0, actual_bytes).unwrap();
-                decode_image(&mut image_context, 0)
+                let key =  decode_image(&mut image_context, 0);
+                (image_context.as_ref(),key )
             }
         };
 
-        let res = compare_bitmaps(c, actual_bitmap, unsafe{ &mut *expected_bitmap }, require.similarity, panic);
+        let res = compare_bitmaps(c, &actual_context, actual_bitmap_key, &expected_context, expected_bitmap_key, require.similarity, panic);
         drop(expected_context); // Context must remain in scope until we are done with expected_bitmap
         res
     }
 }
 
 /// Complains loudly and returns false  if `bitmap` doesn't match the stored checksum and isn't within the off-by-one grace window.
-pub fn bitmap_regression_check(c: &ChecksumCtx, bitmap: &mut BitmapBgra, name: &str, allowed_off_by_one_bytes: usize) -> bool{
+pub fn bitmap_regression_check(c: &ChecksumCtx, context: &Context, bitmap_key: BitmapKey, name: &str, allowed_off_by_one_bytes: usize) -> bool{
 
-    evaluate_result(c, name, ResultKind::Bitmap(bitmap), Constraints{
+    evaluate_result(c,  name, ResultKind::Bitmap{context, key: bitmap_key}, Constraints{
         similarity: Similarity::AllowOffByOneBytesCount(allowed_off_by_one_bytes as i64),
         max_file_size: None
     }, true)
@@ -602,37 +719,32 @@ pub fn bitmap_regression_check(c: &ChecksumCtx, bitmap: &mut BitmapBgra, name: &
 
 
 
+
 /// Compares the bitmap frame result of a given job to the known good checksum. If there is a checksum mismatch, a percentage of off-by-one bytes can be allowed.
 /// If no good checksum has been stored, pass 'store_if_missing' in order to add it.
 /// If you accidentally store a bad checksum, just delete it from the JSON file manually.
 ///
-pub fn compare(input: Option<s::IoEnum>, allowed_off_by_one_bytes: usize, checksum_name: &str, store_if_missing: bool, debug: bool, mut steps: Vec<s::Node>) -> bool {
+pub fn compare(input: Option<IoTestEnum>, allowed_off_by_one_bytes: usize, checksum_name: &str, store_if_missing: bool, debug: bool, steps: Vec<s::Node>) -> bool {
+
+    compare_multiple(input.map(|i| vec![i]), allowed_off_by_one_bytes, checksum_name, store_if_missing, debug, steps)
+}
+pub fn compare_multiple(inputs: Option<Vec<IoTestEnum>>, allowed_off_by_one_bytes: usize, checksum_name: &str, store_if_missing: bool, debug: bool, steps: Vec<s::Node>) -> bool {
+    let mut context = Context::create().unwrap();
+    compare_with_context(&mut context, inputs, allowed_off_by_one_bytes, checksum_name, store_if_missing, debug, steps)
+}
+
+pub fn compare_with_context(context: &mut Context, inputs: Option<Vec<IoTestEnum>>, allowed_off_by_one_bytes: usize, checksum_name: &str, store_if_missing: bool, debug: bool, mut steps: Vec<s::Node>) -> bool {
     let mut bit = BitmapBgraContainer::empty();
     steps.push(unsafe{ bit.get_node()});
 
-    //println!("{}", serde_json::to_string_pretty(&steps).unwrap());
+    let response = build_steps(context, &steps,inputs.unwrap_or(vec![]), None, debug ).unwrap();
 
-    let build = s::Build001 {
-        builder_config: Some(default_build_config(debug)),
-        io: input.map(|i| vec![i.into_input(0)]).unwrap_or(Vec::new()),
-        framewise: s::Framewise::Steps(steps)
-    };
+    if let Some(bitmap_key) = unsafe{ bit.bitmap_key(&context) }{
 
-    if debug {
-        println!("{}", serde_json::to_string_pretty(&build).unwrap());
-    }
-
-    let mut context = Context::create().unwrap();
-    let response = context.build_1(build).unwrap();
-
-    if let Some(b) = unsafe { bit.bitmap(&context) } {
-        if debug {
-            println!("{:?}", b);
-        }
-        let mut ctx = ChecksumCtx::visuals(&context);
+        let mut ctx = ChecksumCtx::visuals();
         ctx.create_if_missing = store_if_missing;
-        bitmap_regression_check(&ctx, b, checksum_name, allowed_off_by_one_bytes)
 
+        bitmap_regression_check(&ctx, context, bitmap_key, checksum_name, allowed_off_by_one_bytes)
     }else{
         panic!("execution failed {:?}", response);
     }
@@ -644,27 +756,22 @@ pub fn compare(input: Option<s::IoEnum>, allowed_off_by_one_bytes: usize, checks
 /// If you accidentally store a bad checksum, just delete it from the JSON file manually.
 ///
 /// The output io_id is 1
-pub fn compare_encoded(input: Option<s::IoEnum>, checksum_name: &str, store_if_missing: bool, debug: bool, require: Constraints, steps: Vec<s::Node>) -> bool {
-    let mut io = vec![s::IoEnum::OutputBuffer.into_output(1)];
-    if let Some(i) = input{
-        io.insert(0, i.into_input(0));
-    }
-    let build = s::Build001 {
-        builder_config: Some(default_build_config(debug)),
-        io,
-        framewise: s::Framewise::Steps(steps)
-    };
+pub fn compare_encoded(input: Option<IoTestEnum>, checksum_name: &str, store_if_missing: bool, debug: bool, require: Constraints, steps: Vec<s::Node>) -> bool {
 
-    if debug {
-        println!("{}", serde_json::to_string_pretty(&build).unwrap());
+    let mut io_vec = Vec::new();
+    if let Some(i) = input{
+        io_vec.push(i);
     }
+    io_vec.push(IoTestEnum::OutputBuffer);
 
     let mut context = Context::create().unwrap();
-    let _ = context.build_1(build).unwrap();
+
+
+    let _ = build_steps(&mut context, &steps, io_vec, None, debug).unwrap();
 
     let bytes = context.get_output_buffer_slice(1).unwrap();
 
-    let mut ctx = ChecksumCtx::visuals(&context);
+    let mut ctx = ChecksumCtx::visuals();
     ctx.create_if_missing = store_if_missing;
 
 
@@ -673,76 +780,95 @@ pub fn compare_encoded(input: Option<s::IoEnum>, checksum_name: &str, store_if_m
 }
 
 
-
-/// Compares the encoded result of a given job to the source. If there is a checksum mismatch, a percentage of off-by-one bytes can be allowed.
-/// The output io_id is 1
-pub fn compare_encoded_to_source(input: s::IoEnum, debug: bool, require: Constraints, steps: Vec<s::Node>) -> bool {
-
-    let input_copy = input.clone();
-
-    let mut io = vec![s::IoEnum::OutputBuffer.into_output(1)];
-    io.insert(0, input.into_input(0));
-    let build = s::Build001 {
-        builder_config: Some(default_build_config(debug)),
-        io,
-        framewise: s::Framewise::Steps(steps)
-    };
-
-    if debug {
-        println!("{}", serde_json::to_string_pretty(&build).unwrap());
-    }
-
+pub fn test_with_callback(checksum_name: &str, input: IoTestEnum, callback: fn(&imageflow_types::ImageInfo) -> (Option<imageflow_types::DecoderCommand>, Vec<Node>) ) -> bool{
     let mut context = Context::create().unwrap();
-    let _ = context.build_1(build).unwrap();
+    let matched:bool;
 
-    let bytes = context.get_output_buffer_slice(1).unwrap();
+    unsafe {
+        IoTestTranslator{}.add(&mut context, 0, input).unwrap();
 
-    let ctx = ChecksumCtx::visuals(&context);
+        let image_info = context.get_unscaled_rotated_image_info(0).unwrap();
 
-    let mut context2 = Context::create().unwrap();
-    let original = decode_input(&mut context2, input_copy);
+        let (tell_decoder, mut steps): (Option<imageflow_types::DecoderCommand>, Vec<Node>) = callback(&image_info);
 
-    let original_checksum = ChecksumCtx::checksum_bitmap(original);
-    ctx.save_frame(original, &original_checksum);
+        if let Some(what) = tell_decoder {
+            let send_hints = imageflow_types::TellDecoder001 {
+                io_id: 0,
+                command: what
+            };
+            let send_hints_str = serde_json::to_string_pretty(&send_hints).unwrap();
+            context.message("v1/tell_decoder", send_hints_str.as_bytes()).1.unwrap();
+        }
 
 
-    compare_with(&ctx, &original_checksum, original, ResultKind::Bytes(bytes), require, true)
+        let mut bit = BitmapBgraContainer::empty();
+        steps.push(bit.get_node());
+
+        let send_execute = imageflow_types::Execute001{
+            framewise: imageflow_types::Framewise::Steps(steps),
+            security: None,
+            graph_recording: None
+        };
+        context.execute_1(send_execute).unwrap();
+
+        let ctx = ChecksumCtx::visuals();
+        matched = bitmap_regression_check(&ctx, &context,bit.bitmap_key(&context).unwrap(), checksum_name, 500)
+    }
+    context.destroy().unwrap();
+    matched
 }
 
 
 
 
 /// Simplified graph recording configuration
-fn default_build_config(debug: bool) -> s::Build001Config {
+pub fn default_build_config(debug: bool) -> s::Build001Config {
     s::Build001Config{
+        security: None,
         graph_recording: if debug {Some(s::Build001GraphRecording::debug_defaults())} else {None},
     }
+}
+
+pub fn default_graph_recording(debug: bool) -> Option<imageflow_types::Build001GraphRecording> {
+    if debug {Some(s::Build001GraphRecording::debug_defaults())} else {None}
+
 }
 
 /// Simplifies access to raw bitmap data from Imageflow (when using imageflow_types::Node)
 /// Consider this an unmovable type. If you move it, you will corrupt the heap.
 pub struct BitmapBgraContainer{
-    dest_bitmap: *mut imageflow_core::ffi::BitmapBgra
+    dest_bitmap: BitmapKey
 }
 impl BitmapBgraContainer{
     pub fn empty() -> Self{
         BitmapBgraContainer{
-            dest_bitmap: std::ptr::null_mut()
+            dest_bitmap: BitmapKey::null()
         }
     }
     /// Creates an operation node containing a pointer to self. Do not move self!
     pub unsafe fn get_node(&mut self) -> s::Node{
-        let ptr_to_ptr = &mut self.dest_bitmap as *mut *mut imageflow_core::ffi::BitmapBgra;
-        s::Node::FlowBitmapBgraPtr { ptr_to_flow_bitmap_bgra_ptr: ptr_to_ptr as usize}
+        let ptr_to_key = &mut self.dest_bitmap as *mut BitmapKey;
+        s::Node::FlowBitmapKeyPtr { ptr_to_bitmap_key: ptr_to_key as usize}
+    }
+
+    pub unsafe fn bitmap_key(&self, _c: &Context) -> Option<BitmapKey>{
+        if self.dest_bitmap.is_null() {
+            None
+        }else {
+            Some(self.dest_bitmap)
+        }
     }
 
     /// Returns a reference the bitmap
     /// This reference is only valid for the duration of the context it was created within
-    pub unsafe fn bitmap<'a>(&self, _: &'a Context) -> Option<&'a mut BitmapBgra>{
+    pub unsafe fn bitmap(&self, c: &Context) -> Option<BitmapBgra>{
         if self.dest_bitmap.is_null(){
             None
         }else {
-            Some(&mut *self.dest_bitmap)
+            Some(c.borrow_bitmaps().unwrap()
+                .try_borrow_mut(self.dest_bitmap).unwrap()
+                .get_window_u8().unwrap()
+                .to_bitmap_bgra().unwrap())
         }
     }
 }

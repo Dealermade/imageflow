@@ -1,17 +1,14 @@
-use Context;
-use flow::definitions::*;
-use ffi::CodecInstance;
-use internal_prelude::works_everywhere::*;
+use crate::Context;
+use crate::flow::definitions::*;
+use crate::internal_prelude::works_everywhere::*;
 use petgraph::dot::Dot;
 use std::process::Command;
 use super::visualize::{notify_graph_changed, GraphRecordingUpdate, GraphRecordingInfo};
 use petgraph::EdgeDirection;
-use rustc_serialize::base64;
-use rustc_serialize::base64::ToBase64;
+use imageflow_helpers::timeywimey::precise_time_ns;
 
 pub struct Engine<'a> {
-    c: &'a Context,
-    job: &'a mut Context,
+    c: &'a mut Context,
     g: Graph,
     more_frames: bool,
 }
@@ -19,11 +16,8 @@ pub struct Engine<'a> {
 impl<'a> Engine<'a> {
 
     pub fn create(context: &'a mut Context, g: Graph) -> Engine<'a> {
-        let split_context_2 = unsafe{ &mut *(context as *mut Context) };
-
         Engine {
             c: context,
-            job: split_context_2,
             g,
             more_frames: false,
         }
@@ -32,13 +26,8 @@ impl<'a> Engine<'a> {
     pub fn ctx(&self) -> OpCtx{
         OpCtx{
             c: self.c,
-            graph: &self.g,
-            job: self.job,
+            graph: &self.g
         }
-    }
-
-    fn flow_c(&self) -> *mut ::ffi::ImageflowContext{
-        self.c.flow_c()
     }
 
     pub fn validate_graph(&self) -> Result<()> {
@@ -72,9 +61,9 @@ impl<'a> Engine<'a> {
             let result = if let Err(e) = n.def.validate_params(&n.params) {
                 Err(e)
             } else if inputs_failed {
-                Err(nerror!(::ErrorKind::InvalidNodeConnections, "Node type {} requires {:?}, but had {} inputs, {} canvases.", n.def.name(), req_edges_in, input_count, canvas_count))
+                Err(nerror!(crate::ErrorKind::InvalidNodeConnections, "Node type {} requires {:?}, but had {} inputs, {} canvases.", n.def.name(), req_edges_in, input_count, canvas_count))
             } else if req_edges_out != EdgesOut::Any && outbound_count > 0 {
-                Err(nerror!(::ErrorKind::InvalidNodeConnections, "Node type {} prohibits child nodes, but had {} outbound edges.", n.def.name(), outbound_count))
+                Err(nerror!(crate::ErrorKind::InvalidNodeConnections, "Node type {} prohibits child nodes, but had {} outbound edges.", n.def.name(), outbound_count))
             } else{
                 Ok(())
             };
@@ -108,7 +97,7 @@ impl<'a> Engine<'a> {
     /// to copying encoded bytes.
     fn execute(&mut self) -> Result<(bool, s::FramePerformance)> {
 
-        let start = time::precise_time_ns();
+        let start = precise_time_ns();
         self.more_frames = false;
         self.validate_graph()?;
         self.notify_graph_changed()?;
@@ -121,7 +110,7 @@ impl<'a> Engine<'a> {
                 break;
             }
 
-            if passes >= self.job.max_calc_flatten_execute_passes {
+            if passes >= self.c.max_calc_flatten_execute_passes {
                 {
                     self.notify_graph_complete()?;
                 }
@@ -176,7 +165,7 @@ impl<'a> Engine<'a> {
 
 
         let total_node_ns = self.g.node_weights_mut().map(|n|  n.cost.wall_ns).sum::<u64>();
-        let total_ns = time::precise_time_ns() - start;
+        let total_ns = precise_time_ns() - start;
         let wall_microseconds = (total_ns as f64 / 1000f64).round() as u64;
         let overhead_microseconds = ((total_ns as i64 - total_node_ns as i64) as f64 / 1000f64).round() as i64;
 
@@ -203,7 +192,7 @@ impl<'a> Engine<'a> {
 
             if let Some((io_id, commands)) = result_value {
                 for c in commands {
-                    self.job.tell_decoder(io_id, c.to_owned()).unwrap();
+                    self.c.tell_decoder(io_id, c.to_owned()).unwrap();
                 }
             }
         }
@@ -226,8 +215,8 @@ impl<'a> Engine<'a> {
         for index in 0..self.g.node_count() {
             let weight = self.g.node_weight_mut(NodeIndex::new(index)).unwrap();
             if weight.stable_id < 0 {
-                weight.stable_id = self.job.next_stable_node_id;
-                self.job.next_stable_node_id += 1;
+                weight.stable_id = self.c.next_stable_node_id;
+                self.c.next_stable_node_id += 1;
             }
         }
         Ok(())
@@ -238,34 +227,61 @@ impl<'a> Engine<'a> {
         self.assign_stable_ids()?;
 
         let info = GraphRecordingInfo {
-            debug_job_id: self.job.debug_job_id,
-            record_graph_versions: self.job.graph_recording.record_graph_versions.unwrap_or(false),
-            current_graph_version: self.job.next_graph_version,
-            render_graph_versions: self.job.graph_recording.record_graph_versions.unwrap_or(false),
+            debug_job_id: self.c.debug_job_id,
+            record_graph_versions: self.c.graph_recording.record_graph_versions.unwrap_or(false),
+            current_graph_version: self.c.next_graph_version,
+            render_graph_versions: self.c.graph_recording.record_graph_versions.unwrap_or(false),
             maximum_graph_versions: 100,
         };
-        let update = notify_graph_changed(&mut self.g, &info)?;
+        let update = notify_graph_changed(self.c,&mut self.g, &info)?;
         if let Some(GraphRecordingUpdate { next_graph_version }) = update {
-            self.job.next_graph_version = next_graph_version;
+            self.c.next_graph_version = next_graph_version;
         }
         Ok(())
     }
 
     fn notify_graph_complete(&mut self) -> Result<()> {
-        if self.job.next_graph_version > 0 && self.job.graph_recording.record_graph_versions.unwrap_or(false) {
+        if self.c.next_graph_version > 0 && self.c.graph_recording.record_graph_versions.unwrap_or(false) {
             let prev_filename =
                 format!("job_{}_graph_version_{}.dot",
-                        self.job.debug_job_id,
-                        self.job.next_graph_version - 1);
+                        self.c.debug_job_id,
+                        self.c.next_graph_version - 1);
 
             super::visualize::render_dotfile_to_png(&prev_filename);
         }
         Ok(())
     }
 
+    fn validate_frame_size(est: FrameEstimate, security: &imageflow_types::ExecutionSecurity) -> Result<()>{
+        // Validate frame size
+        let info = match est{
+            FrameEstimate::Some(info) => Some(info),
+            FrameEstimate::UpperBound(info) => Some(info),
+            _ => None
+        };
+        if let Some(frame_info) = info{
+            let max_frame_size = security.max_frame_size.clone()
+                .expect("Context.security.max_frame_size required");
+            if max_frame_size.w.leading_zeros() == 0 ||
+                max_frame_size.h.leading_zeros() == 0{
+                return Err(nerror!(ErrorKind::SizeLimitExceeded, "max_frame_size values overflow an i32"));
+            }
+            if frame_info.w > max_frame_size.w as i32 {
+                return Err(nerror!(ErrorKind::SizeLimitExceeded, "Frame width {} exceeds max_frame_size.w {}", frame_info.w, max_frame_size.w))
+            }
+            if frame_info.h > max_frame_size.h as i32 {
+                return Err(nerror!(ErrorKind::SizeLimitExceeded, "Frame height {} exceeds max_frame_size.h {}", frame_info.h, max_frame_size.h))
+            }
+            let megapixels = frame_info.w as f32 * frame_info.h as f32 / 1000000f32;
+            if megapixels > max_frame_size.megapixels {
+                return Err(nerror!(ErrorKind::SizeLimitExceeded, "Frame megapixels {} exceeds max_frame_size.megapixels {}", megapixels, max_frame_size.megapixels))
+            }
+        }
+        Ok(())
+    }
 
     pub fn estimate_node(&mut self, node_id: NodeIndex) -> Result<FrameEstimate> {
-        let now = time::precise_time_ns();
+        let now = precise_time_ns();
         let mut ctx = self.op_ctx_mut();
 
         // Invoke estimation
@@ -279,9 +295,11 @@ impl<'a> Engine<'a> {
 
         if let Ok(v) = result {
             ctx.weight_mut(node_id).frame_est = v;
+
+            Engine::validate_frame_size(v, &ctx.c.security)?;
         }
 
-        ctx.weight_mut(node_id).cost.wall_ns += time::precise_time_ns() - now;
+        ctx.weight_mut(node_id).cost.wall_ns += precise_time_ns() - now;
         result
     }
 
@@ -447,56 +465,61 @@ impl<'a> Engine<'a> {
                     }
 
                 } else if !def.can_expand(){
-                    return Err(nerror!(::ErrorKind::MethodNotImplemented, "Nodes must can_execute() or can_expand(). {:?} does neither", def).into());
+                    return Err(nerror!(crate::ErrorKind::MethodNotImplemented, "Nodes must can_execute() or can_expand(). {:?} does neither", def).into());
                 }
             }
             match next {
                 None => return Ok(()),
                 Some((next_ix, def)) => {
                     let more_frames = {
-                        let now = time::precise_time_ns();
+                        let now = precise_time_ns();
                         let mut ctx = self.op_ctx_mut();
                         let result = def.execute(&mut ctx, next_ix).map_err(|e| e.with_ctx_mut(&ctx, next_ix).at(here!()))?;
 
                         if result == NodeResult::None {
-                            return Err(nerror!(::ErrorKind::InvalidOperation, "Node {} execution returned {:?}", def.name(), result).into());
+                            return Err(nerror!(crate::ErrorKind::InvalidOperation, "Node {} execution returned {:?}", def.name(), result).into());
                         }else{
                             // Force update the estimate to match reality
-                            if let NodeResult::Frame(bit) = result{
-                                if !bit.is_null() {
-                                    unsafe {
-                                        ctx.weight_mut(next_ix).frame_est = FrameEstimate::Some((*bit).frame_info());
-                                    }
-                                }
+                            if let NodeResult::Frame(bitmap_key) = result {
+
+                                let bitmap_frame_info = ctx.c.borrow_bitmaps()
+                                    .map_err(|e| e.at(here!()))?
+                                    .try_borrow_mut(bitmap_key)
+                                    .map_err(|e| e.at(here!()))?
+                                    .frame_info();
+
+                                ctx.weight_mut(next_ix).frame_est = FrameEstimate::Some(bitmap_frame_info);
                             }
                             ctx.weight_mut(next_ix).result = result;
                         }
-                        ctx.weight_mut(next_ix).cost.wall_ns += time::precise_time_ns() - now;
+                        ctx.weight_mut(next_ix).cost.wall_ns += precise_time_ns() - now;
                         ctx.more_frames.get()
                     };
 
                     self.more_frames = self.more_frames || more_frames;
 
                     unsafe {
-                        if self.job.graph_recording.record_frame_images.unwrap_or(false) {
-                            if let NodeResult::Frame(ptr) = self.g
+                        if self.c.graph_recording.record_frame_images.unwrap_or(false) {
+                            if let NodeResult::Frame(bitmap_key) = self.g
                                 .node_weight(next_ix)
                                 .unwrap()
                                 .result {
                                 let path = format!("node_frames/job_{}_node_{}.png",
-                                                   self.job.debug_job_id,
+                                                   self.c.debug_job_id,
                                                    self.g.node_weight(next_ix).unwrap().stable_id);
-                                let path_copy = path.clone();
-                                let path_cstr = std::ffi::CString::new(path).unwrap();
                                 let _ = std::fs::create_dir("node_frames");
-                                if !::ffi::flow_bitmap_bgra_save_png(self.c.flow_c(),
-                                                                     ptr,
-                                                                     path_cstr.as_ptr()) {
-                                    println!("Failed to save frame {} (from node {})",
-                                             path_copy,
-                                             next_ix.index());
-                                    cerror!(self.c).panic();
-                                }
+
+
+                                let bitmaps = self.c.borrow_bitmaps()
+                                    .map_err(|e| e.at(here!()))?;
+                                let mut bitmap = bitmaps.try_borrow_mut(bitmap_key)
+                                    .map_err(|e| e.at(here!()))?;
+
+                                let bitmap_bgra = bitmap.get_window_u8().unwrap().to_bitmap_bgra()?;
+
+                                crate::codecs::write_png(&path, &bitmap_bgra)
+                                    .map_err(|e| e.at(here!()))?;
+
                             }
                         }
                     }
@@ -509,7 +532,6 @@ impl<'a> Engine<'a> {
         OpCtxMut {
             c: self.c,
             graph: &mut self.g,
-            job: self.job,
             more_frames: Cell::new(false),
         }
     }
@@ -531,12 +553,15 @@ impl<'a> Engine<'a> {
     pub fn collect_encode_results(&self) -> Vec<s::EncodeResult>{
         let mut encodes = Vec::new();
         for node in self.g.raw_nodes() {
-            if let ::flow::definitions::NodeResult::Encoded(ref r) = node.weight.result {
+            if let crate::flow::definitions::NodeResult::Encoded(ref r) = node.weight.result {
                 encodes.push((*r).clone());
             }
         }
         encodes
     }
+
+
+
     pub fn collect_augmented_encode_results(&self, io: &[s::IoObject]) -> Vec<s::EncodeResult>{
         self.collect_encode_results().into_iter().map(|r: s::EncodeResult|{
             if r.bytes == s::ResultBytes::Elsewhere {
@@ -545,7 +570,10 @@ impl<'a> Engine<'a> {
                     s::IoEnum::Filename(ref str) => s::ResultBytes::PhysicalFile(str.to_owned()),
                     s::IoEnum::OutputBase64 => {
                         let slice = self.c.get_output_buffer_slice(r.io_id).map_err(|e| e.at(here!())).unwrap();
-                        s::ResultBytes::Base64(slice.to_base64(base64::Config{char_set: base64::CharacterSet::Standard, line_length: None, newline: base64::Newline::LF, pad: true}))
+                        let b64 = base64::encode_config(slice,
+                                                        base64::Config::new(base64::CharacterSet::Standard, true));
+
+                        s::ResultBytes::Base64(b64)
                     },
                     _ => s::ResultBytes::Elsewhere
                 };
@@ -563,7 +591,7 @@ impl<'a> Engine<'a> {
 impl<'a> OpCtxMut<'a> {
     pub fn graph_to_str(&mut self) -> Result<String> {
         let mut vec = Vec::new();
-        super::visualize::print_graph(&mut vec, self.graph, None).unwrap();
+        super::visualize::print_graph(self.c, &mut vec, self.graph, None).unwrap();
         Ok(String::from_utf8(vec).unwrap())
     }
 }
@@ -571,7 +599,9 @@ impl<'a> OpCtxMut<'a> {
 
 
 use daggy::walker::Walker;
-
+use crate::flow::definitions::NodeResult::Frame;
+use crate::codecs::NamedEncoders::LodePngEncoder;
+use base64::CharacterSet;
 
 
 pub fn flow_node_has_dimensions(g: &Graph, node_id: NodeIndex) -> bool {

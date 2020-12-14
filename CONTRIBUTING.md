@@ -1,8 +1,4 @@
 
-## Use [conventional git commits](https://github.com/angular/angular.js/blob/master/CONTRIBUTING.md)
-
-
-
 ### Contributing code - legally
 
 We reserve the right to relicense this software (or portions thereof) in order to ensure its sustainability. To make this possible, we have [a Contributor Agreement](http://imageresizing.net/licenses/contribute) lifted from the Apache foundation.
@@ -13,6 +9,6 @@ Small commits can simply include this statement:
         (http://imageresizing.net/licenses/contribute), the terms of which I accept and agree.
         - [Name] [Date]
 
-Frequent or heavy commiters should [sign and date the actual agreement](http://imageresizing.net/licenses/contribute), which only needs to be done once. Digital signatures or scanned copies are accepted; send them to support@imageresizing.net. 
+Frequent or heavy committers should [sign and date the actual agreement](http://imageresizing.net/licenses/contribute), which only needs to be done once. Digital signatures or scanned copies are accepted; send them to support@imageresizing.net. 
 
 If you are introducing any new dependencies, those licenses may obligate you to create a notice.txt or license.txt file.

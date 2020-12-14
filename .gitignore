@@ -16,24 +16,14 @@
 /bindings/ruby/bin
 /ci/pack_nuget/staging
 
-# Compiled conanfile
-conanfile.pyc
-# Test package builds from conna
-test_package/build/
-# Conan cargo wrapper
-conan_cargo_build.rs
-
 
 #Generated for tests
 build/
 cacert.pem
 node_frames/
-conaninfo.txt
-conanbuildinfo.cmake
 CTestTestfile.cmake
 
 # Coverage things
-.conan/
 .sudo_as_admin_successful
 coverage.info
 imageflow_cache/
@@ -326,7 +316,6 @@ FakesAssemblies/
 
 dssim.tar.gz
 /dssim/
-imageflow_core/conanbuildinfo.txt
 
 /examples/*/*.json
 /examples/*/*.jpg
@@ -336,4 +325,4 @@ imageflow_core/tests/visuals/images.txt
 c_components/tests/generated_idct.c
 c_components/tests/rect_1_1_9_9.png
 c_components/tests/rect_2_3_70_70.png
-c_components/tests/catch.hpp
+imageflow_core/generated_idct.c

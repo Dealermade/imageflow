@@ -1,18 +1,23 @@
 use std;
-use for_other_imageflow_crates::preludes::external_without_std::*;
-use ffi;
-use ::{CError, JsonResponse, ErrorKind, FlowError, Result};
-use io::IoProxy;
-use flow::definitions::Graph;
+use crate::for_other_imageflow_crates::preludes::external_without_std::*;
+use crate::ffi;
+use crate::{CError, JsonResponse, ErrorKind, FlowError, Result};
+use crate::io::IoProxy;
+use crate::flow::definitions::Graph;
 use std::any::Any;
 use imageflow_types::collections::AddRemoveSet;
-use ffi::ImageflowJsonResponse;
-use errors::{OutwardErrorBuffer, CErrorProxy};
+use crate::ffi::ImageflowJsonResponse;
+use crate::errors::{OutwardErrorBuffer, CErrorProxy};
 
-use codecs::CodecInstanceContainer;
-use ffi::IoDirection;
+use crate::codecs::CodecInstanceContainer;
+use crate::codecs::EnabledCodecs;
+use crate::ffi::IoDirection;
+use crate::graphics::bitmaps::{BitmapWindowMut, BitmapKey, Bitmap, BitmapsContainer};
+use crate::allocation_container::AllocationContainer;
+use imageflow_types::ImageInfo;
+use itertools::Itertools;
 
-/// Something of a God object (which is necessary for a reasonable FFI interface).
+/// Something of a god object (which is necessary for a reasonable FFI interface).
 pub struct Context {
     /// The C context object
     c_ctx: *mut ffi::ImageflowContext,
@@ -29,10 +34,20 @@ pub struct Context {
     /// Codecs, which in turn connect to I/O instances.
     pub codecs: AddRemoveSet<CodecInstanceContainer>, // This loans out exclusive mutable references to items, bounding the ownership lifetime to Context
     /// A list of io_ids already in use
-    pub io_id_list: RefCell<Vec<i32>>
+    pub io_id_list: RefCell<Vec<i32>>,
+
+    pub enabled_codecs: EnabledCodecs,
+
+    pub security: imageflow_types::ExecutionSecurity,
+
+    pub bitmaps: RefCell<crate::graphics::bitmaps::BitmapsContainer>,
+
+    pub allocations: RefCell<AllocationContainer>
 }
 
+//TODO: isn't this supposed to increment with each new context in process?
 static mut JOB_ID: i32 = 0;
+
 impl Context {
 
     pub fn create() -> Result<Box<Context>>{
@@ -54,7 +69,19 @@ impl Context {
                 max_calc_flatten_execute_passes: 40,
                 graph_recording: s::Build001GraphRecording::off(),
                 codecs: AddRemoveSet::with_capacity(4),
-                io_id_list: RefCell::new(Vec::with_capacity(2))
+                io_id_list: RefCell::new(Vec::with_capacity(2)),
+                enabled_codecs: EnabledCodecs::default(),
+                bitmaps: RefCell::new(crate::graphics::bitmaps::BitmapsContainer::with_capacity(16)),
+                security: imageflow_types::ExecutionSecurity{
+                    max_decode_size: None,
+                    max_frame_size: Some(imageflow_types::FrameSizeLimit{
+                        w: 10000,
+                        h: 10000,
+                        megapixels: 100f32
+                    }),
+                    max_encode_size: None
+                },
+                allocations: RefCell::new(AllocationContainer::new())
             }))
         }
     }
@@ -101,8 +128,55 @@ impl Context {
 
 
     pub fn message(&mut self, method: &str, json: &[u8]) -> (JsonResponse, Result<()>) {
-        ::context_methods::CONTEXT_ROUTER.invoke(self, method, json)
+        crate::context_methods::CONTEXT_ROUTER.invoke(self, method, json)
     }
+
+    pub fn borrow_bitmaps_mut(&self) -> Result<RefMut<BitmapsContainer>>{
+        self.bitmaps.try_borrow_mut()
+            .map_err(|e| nerror!(ErrorKind::FailedBorrow, "Failed to mutably borrow bitmaps collection: {:?}", e))
+
+    }
+    pub fn borrow_bitmaps(&self) -> Result<Ref<BitmapsContainer>>{
+        self.bitmaps.try_borrow()
+            .map_err(|e| nerror!(ErrorKind::FailedBorrow, "Failed to borrow bitmaps collection: {:?}", e))
+
+    }
+
+    /// mem_calloc should not panic
+    pub unsafe fn mem_calloc(&self, bytes: usize, alignment: usize,filename: *const libc::c_char, line: i32) -> Result<*mut u8>{
+        let mut allocations = self.allocations.try_borrow_mut()
+            .map_err(|e| {
+                let filename_str = if filename.is_null(){
+                    "[no filename provided]"
+                } else{
+                    let c_filename = CStr::from_ptr(filename);
+                    c_filename.to_str().unwrap_or("[non UTF-8 filename]")
+                };
+
+                nerror!(ErrorKind::FailedBorrow, "Failed to mutably borrow allocations collection: {:?}\n{}:{}", e, filename_str, line)
+            })?;
+
+        let result = allocations.allocate(bytes, alignment)
+            .map_err(|e| {
+                let filename_str = if filename.is_null(){
+                    "[no filename provided]"
+                } else{
+                    let c_filename = CStr::from_ptr(filename);
+                    c_filename.to_str().unwrap_or("[non UTF-8 filename]")
+                };
+
+                nerror!(ErrorKind::AllocationFailed, "Failed to allocate {} bytes with alignment {}: {:?}\n{}:{}", bytes, alignment, e, filename_str, line)
+            })?;
+        Ok(result)
+    }
+
+    /// mem_calloc should not panic
+    pub unsafe fn mem_free(&self, ptr: *const u8) -> bool{
+        self.allocations.try_borrow_mut()
+            .map(|mut list| list.free(ptr))
+            .unwrap_or(false)
+    }
+
 
 
     pub fn flow_c(&self) -> *mut ffi::ImageflowContext{
@@ -115,6 +189,8 @@ impl Context {
 
     fn add_io(&self, io: IoProxy, io_id: i32, direction: IoDirection) -> Result<()>{
 
+        self.io_id_list.borrow_mut().push(io_id);
+
         let codec_value = CodecInstanceContainer::create(self, io, io_id, direction).map_err(|e| e.at(here!()))?;
         let mut codec = self.codecs.add_mut(codec_value);
         if let Ok(d) = codec.get_decoder(){
@@ -125,60 +201,134 @@ impl Context {
 
     pub fn get_output_buffer_slice(&self, io_id: i32) -> Result<&[u8]> {
         let codec = self.get_codec(io_id).map_err(|e| e.at(here!()))?;
-        let io = codec.get_encode_io()?.expect("Not an output buffer");
-        io.map(|io| io.get_output_buffer_bytes(self).map_err(|e| e.at(here!())))
+        let result = if let Some(io) = codec.get_encode_io().map_err(|e| e.at(here!()))? {
+            io.map(|io| io.get_output_buffer_bytes(self).map_err(|e| e.at(here!())))
+        }else{
+            Err(nerror!(ErrorKind::InvalidArgument, "io_id {} is not an output buffer", io_id))
+        };
+        result
     }
 
     pub fn add_file(&mut self, io_id: i32, direction: IoDirection, path: &str) -> Result<()> {
-        let mode = match direction {
-            s::IoDirection::In => ::ffi::IoMode::ReadSeekable,
-            s::IoDirection::Out => ::ffi::IoMode::WriteSeekable,
-        };
-        self.add_file_with_mode(io_id, direction, path, mode).map_err(|e| e.at(here!()))
-    }
-    pub fn add_file_with_mode(&mut self, io_id: i32, direction: IoDirection, path: &str, mode: ::IoMode) -> Result<()> {
-        if direction == IoDirection::In && !mode.can_read() {
-            return Err(nerror!(ErrorKind::InvalidArgument, "You cannot add an input file with an IoMode that can't read"));
-        }
-        if direction == IoDirection::Out && !mode.can_write() {
-            return Err(nerror!(ErrorKind::InvalidArgument, "You cannot add an output file with an IoMode that can't write"));
-        }
-        let io =  IoProxy::file_with_mode(self, io_id,  path, mode).map_err(|e| e.at(here!()))?;
+        let io =  IoProxy::file_with_mode(self, io_id,  path, direction)
+            .map_err(|e| e.at(here!()))?;
         self.add_io(io, io_id, direction).map_err(|e| e.at(here!()))
     }
-
 
     pub fn add_copied_input_buffer(&mut self, io_id: i32, bytes: &[u8]) -> Result<()> {
         let io = IoProxy::copy_slice(self, io_id,  bytes).map_err(|e| e.at(here!()))?;
 
         self.add_io(io, io_id, IoDirection::In).map_err(|e| e.at(here!()))
     }
-    pub fn add_input_bytes<'b>(&'b mut self, io_id: i32, bytes: &'b [u8]) -> Result<()> {
-        self.add_input_buffer(io_id, bytes)
-    }
-    pub fn add_input_buffer<'b>(&'b mut self, io_id: i32, bytes: &'b [u8]) -> Result<()> {
-        let io = IoProxy::read_slice(self, io_id,  bytes).map_err(|e| e.at(here!()))?;
+    pub fn add_input_vector(&mut self, io_id: i32, bytes: Vec<u8>) -> Result<()> {
+        let io = IoProxy::read_vec(self, io_id,  bytes).map_err(|e| e.at(here!()))?;
 
         self.add_io(io, io_id, IoDirection::In).map_err(|e| e.at(here!()))
     }
 
+    pub fn add_input_bytes<'b>(&'b mut self, io_id: i32, bytes: &'b [u8]) -> Result<()> {
+        self.add_input_buffer(io_id, bytes)
+    }
+    pub fn add_input_buffer<'b>(&'b mut self, io_id: i32, bytes: &'b [u8]) -> Result<()> {
+        let io = unsafe { IoProxy::read_slice(self, io_id,  bytes)}.map_err(|e| e.at(here!()))?;
+
+        self.add_io(io, io_id, IoDirection::In).map_err(|e| e.at(here!()))
+    }
+
+    
     pub fn add_output_buffer(&mut self, io_id: i32) -> Result<()> {
         let io = IoProxy::create_output_buffer(self, io_id).map_err(|e| e.at(here!()))?;
 
         self.add_io(io, io_id, IoDirection::Out).map_err(|e| e.at(here!()))
     }
 
+    
+    fn swap_dimensions_by_exif(&mut self, io_id: i32, image_info: &mut ImageInfo) -> Result<()>{
+        let exif_maybe = self.get_codec(io_id)
+            .map_err(|e| e.at(here!()))?
+            .get_decoder()
+            .map_err(|e| e.at(here!()))?
+            .get_exif_rotation_flag(self)
+            .map_err(|e| e.at(here!()))?;
 
-    pub fn get_image_info(&mut self, io_id: i32) -> Result<s::ImageInfo> {
-        self.get_codec(io_id).map_err(|e| e.at(here!()))?.get_decoder().map_err(|e| e.at(here!()))?.get_image_info(self).map_err(|e| e.at(here!()))
+        if let Some(exif_flag) = exif_maybe{
+            if exif_flag >= 5 && exif_flag <= 8 {
+                let temp = image_info.image_width;
+                image_info.image_width = image_info.image_height;
+                image_info.image_height = temp;
+            }
+        }
+        Ok(())
     }
+
+    pub fn get_unscaled_unrotated_image_info(&mut self, io_id: i32) -> Result<s::ImageInfo> {
+        self.get_codec(io_id)
+            .map_err(|e| e.at(here!()))?
+            .get_decoder()
+            .map_err(|e| e.at(here!()))?
+            .get_unscaled_image_info(self)
+            .map_err(|e| e.at(here!()))
+    }
+
+    pub fn get_unscaled_rotated_image_info(&mut self, io_id: i32) -> Result<s::ImageInfo> {
+        let mut image_info = self.get_unscaled_unrotated_image_info(io_id).
+            map_err(|e| e.at(here!()))?;
+
+        self.swap_dimensions_by_exif(io_id, &mut image_info)?;
+        Ok(image_info)
+    }
+
+    pub fn get_image_decodes(&mut self) -> Vec<s::DecodeResult>{
+        let io_ids = self.io_id_list.borrow().to_vec();
+
+        io_ids.iter().map(|io_id| {
+            if let Ok(info) = self.get_unscaled_rotated_image_info(*io_id){
+                Some(imageflow_types::DecodeResult{
+                    io_id: *io_id,
+                    preferred_extension: info.preferred_extension,
+                    preferred_mime_type: info.preferred_mime_type,
+                    w: info.image_width,
+                    h: info.image_width
+                })
+            }else{
+                None
+            }
+        })
+            .filter(|r| r.is_some())
+            .map(|r| r.unwrap())
+            .sorted_by_key(|r| r.io_id)
+            .collect_vec()
+    }
+
+    pub fn get_scaled_unrotated_image_info(&mut self, io_id: i32) -> Result<s::ImageInfo> {
+        self.get_codec(io_id)
+            .map_err(|e| e.at(here!()))?
+            .get_decoder()
+            .map_err(|e| e.at(here!()))?
+            .get_scaled_image_info(self)
+            .map_err(|e| e.at(here!()))
+    }
+
+    pub fn get_scaled_rotated_image_info(&mut self, io_id: i32) -> Result<s::ImageInfo> {
+        let mut image_info = self.get_scaled_unrotated_image_info(io_id)
+            .map_err(|e| e.at(here!()))?;
+
+        self.swap_dimensions_by_exif(io_id, &mut image_info)?;
+        Ok(image_info)
+    }
+
 
     pub fn tell_decoder(&mut self, io_id: i32, tell: s::DecoderCommand) -> Result<()> {
         self.get_codec(io_id).map_err(|e| e.at(here!()))?.get_decoder().map_err(|e| e.at(here!()))?.tell_decoder(self,  tell).map_err(|e| e.at(here!()))
     }
 
     pub fn get_exif_rotation_flag(&mut self, io_id: i32) -> Result<Option<i32>>{
-        self.get_codec(io_id).map_err(|e| e.at(here!()))?.get_decoder().map_err(|e| e.at(here!()))?.get_exif_rotation_flag( self).map_err(|e| e.at(here!()))
+        self.get_codec(io_id)
+            .map_err(|e| e.at(here!()))?
+            .get_decoder()
+            .map_err(|e| e.at(here!()))?
+            .get_exif_rotation_flag( self)
+            .map_err(|e| e.at(here!()))
 
     }
 
@@ -204,23 +354,30 @@ impl Context {
 
     /// For executing a complete job
     pub fn build_1(&mut self, parsed: s::Build001) -> Result<s::ResponsePayload> {
-        let g = ::parsing::GraphTranslator::new().translate_framewise(parsed.framewise).map_err(|e| e.at(here!())) ?;
+        let g = crate::parsing::GraphTranslator::new().translate_framewise(parsed.framewise).map_err(|e| e.at(here!())) ?;
 
 
-        if let Some(s::Build001Config { graph_recording, .. }) = parsed.builder_config {
+        if let Some(s::Build001Config { graph_recording, security, .. }) = parsed.builder_config {
             if let Some(r) = graph_recording {
                 self.configure_graph_recording(r);
             }
+            if let Some(s) = security{
+                self.configure_security(s);
+            }
         }
 
-        ::parsing::IoTranslator{}.add_all( self, parsed.io.clone())?;
 
-        let mut engine = ::flow::execution_engine::Engine::create(self, g);
+
+        crate::parsing::IoTranslator{}.add_all( self, parsed.io.clone())?;
+
+        let decodes = self.get_image_decodes();
+
+        let mut engine = crate::flow::execution_engine::Engine::create(self, g);
 
         let perf = engine.execute_many().map_err(|e| e.at(here!())) ?;
 
 
-        Ok(s::ResponsePayload::BuildResult(s::JobResult { encodes: engine.collect_augmented_encode_results(&parsed.io), performance: Some(perf) }))
+        Ok(s::ResponsePayload::BuildResult(s::JobResult  { decodes, encodes: engine.collect_augmented_encode_results(&parsed.io), performance: Some(perf) }))
     }
 
     pub fn configure_graph_recording(&mut self, recording: s::Build001GraphRecording) {
@@ -233,19 +390,56 @@ impl Context {
         self.graph_recording = r;
     }
 
+    pub fn configure_security(&mut self, s: s::ExecutionSecurity) {
+        if let Some(decode) = s.max_decode_size{
+            self.security.max_decode_size = Some(decode);
+        }
+        if let Some(frame) = s.max_frame_size{
+            self.security.max_frame_size = Some(frame);
+        }
+        if let Some(encode) = s.max_encode_size{
+            self.security.max_encode_size = Some(encode);
+        }
+    }
+
     /// For executing an operation graph (assumes you have already configured the context with IO sources/destinations as needed)
     pub fn execute_1(&mut self, what: s::Execute001) -> Result<s::ResponsePayload>{
-        let g = ::parsing::GraphTranslator::new().translate_framewise(what.framewise).map_err(|e| e.at(here!()))?;
+        let g = crate::parsing::GraphTranslator::new().translate_framewise(what.framewise).map_err(|e| e.at(here!()))?;
         if let Some(r) = what.graph_recording {
             self.configure_graph_recording(r);
         }
-        let mut engine = ::flow::execution_engine::Engine::create(self, g);
+        if let Some(s) = what.security{
+            self.configure_security(s);
+        }
+
+        let decodes = self.get_image_decodes();
+
+        let mut engine = crate::flow::execution_engine::Engine::create(self, g);
 
         let perf = engine.execute_many().map_err(|e| e.at(here!()))?;
 
-        Ok(s::ResponsePayload::JobResult(s::JobResult { encodes: engine.collect_encode_results(), performance: Some(perf) }))
+        Ok(s::ResponsePayload::JobResult(s::JobResult { decodes, encodes: engine.collect_encode_results(), performance: Some(perf) }))
     }
 
+    pub fn get_version_info(&self) -> Result<s::VersionInfo>{
+        Ok(s::VersionInfo{
+            long_version_string: imageflow_types::version::one_line_version().to_string(),
+            last_git_commit: imageflow_types::version::last_commit().to_string(),
+            dirty_working_tree: imageflow_types::version::dirty(),
+            build_date: imageflow_types::version::get_build_date().to_string(),
+            git_tag: imageflow_types::version::get_build_env_value("GIT_OPTIONAL_TAG").to_owned().map(|s| s.to_string()),
+            git_describe_always: imageflow_types::version::get_build_env_value("GIT_DESCRIBE_ALWAYS").or(Some("")).unwrap().to_owned(),
+        })
+    }
+}
+
+#[cfg(test)]
+fn test_get_output_buffer_slice_wrong_type_error(){
+
+    let mut context = Context::create().unwrap();
+    context.add_input_bytes(0, b"abcdef").unwrap();
+
+    assert_eq!(ErrorKind::InvalidArgument, context.get_output_buffer_slice(0).err().unwrap().kind);
 
 }
 

@@ -1,20 +1,22 @@
 [package]
 name = "imageflow_core"
 version = "0.1.0"
-authors = ["Nathanael Jones <nathanael.jones@gmail.com>"]
+authors = ["Lilith River <lilith@imazen.io>"]
 workspace = "../"
+edition = "2018"
 
 [lib]
 name = "imageflow_core"
 doctest = false
+bench = false
 
 [dependencies]
 libc = "0.2"
 
-num = "0.1"
+num = "0.3"
 
 # time
-time = "0.1"
+time = "0.2" # Update to 0.2.9
 chrono =  "0.4"
 
 # serialization
@@ -28,39 +30,70 @@ lazy_static = "1"
 
 # fast hashes, crypto hashes
 twox-hash = "1"
-fnv = "*"
+fnv = "1"
 blake2-rfc = "0.2"
 
 ## Crate-specific dependencies
 
-clap = "2"
 threadpool = "1"
-petgraph = "0.4"
-daggy = "0.5"
+petgraph = "0.4" #Upgrade to 0.5
+daggy = "0.5" # Upgrade to 0.6
 
-smallvec = "*"
+smallvec = "1"
 
-itertools = "*"
-imgref = "1.3.3"
+itertools = "0.9"
+imgref = "1.4.1"
+slotmap = "0.4.0"
+base64 = "0.13"
+hex = "0.4"
 
-dssim = "2.9.7"
-gif = "*"
-rgb = "0.8.6"
-imagequant = "2.11.7"
-lodepng = "2.1.2"
+gif = "0.10"
+rgb = { version = "0.8", features = ["argb"] }
+imagequant = "2"
+lodepng = "3"
+flate2 = { version = "1.0", features = ["zlib"], default-features = false }
+libwebp-sys = "0.3"
+libz-sys = { version="1", features = ["static"] }
 
-lcms2 = "5.0"
+jpeg-decoder = "0.1"
+
+lcms2 = { git = "https://github.com/imazen/rust-lcms2" }
+lcms2-sys = "3"
 chashmap = "2.2"
 
-getopts ="0.2.15"
+getopts ="0.2"
+byteorder="1"
 
-url = "1.4"
-uuid = { version = "0.5", features = ["v4"] }
+url = "1" # Upgrade to 2.1.1
+uuid = { version = "0.7", features = ["v4"] } # Upgrade to 0.8
 
+rustface = { git = "https://github.com/atomashpolskiy/rustface" }
 imageflow_types = { path = "../imageflow_types", version = "*" }
 imageflow_helpers = { path = "../imageflow_helpers", version = "*" }
 imageflow_riapi = { path = "../imageflow_riapi", version = "*" }
 imageflow_c_components = { path = "../c_components" }
+mozjpeg = "0.8.17"
+mozjpeg-sys = {version = "0.10.5", features = ["nasm_simd"]}
+
+evalchroma = "0.1.1"
+
+# For build info see https://github.com/kornelski/rust-libpng-sys/blob/master/Cargo.toml
+# And https://github.com/kornelski/rust-libpng-sys/blob/master/build.rs
+libpng-sys = { version = "1.1.8", features = ["static", "static-libz", "libz-sys"] }
+
+
 
 [dev-dependencies]
-hyper = "=0.10.12"
+hyper = "0.13"
+imageflow_http_helpers = { path = "../imageflow_http_helpers", version = "*" }
+dssim = "2.11.4"
+criterion = "0.3"
+
+[features]
+default = []
+nightly = ["imageflow_helpers/nightly"]
+
+[[bench]]
+name="bench_graphics"
+path = "benches/bench_graphics.rs"
+harness = false

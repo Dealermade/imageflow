@@ -1,11 +1,8 @@
-use flow::definitions::{Graph, Node, NodeParams, EdgeKind};
-use flow::nodes;
-use internal_prelude::works_everywhere::*;
-use ffi;
-use rustc_serialize::hex::FromHex;
-use rustc_serialize::base64::FromBase64;
-use ::{Context,IoProxy};
-
+use crate::flow::definitions::{Graph, Node, NodeParams, EdgeKind};
+use crate::flow::nodes;
+use crate::internal_prelude::works_everywhere::*;
+use crate::ffi;
+use crate::{Context,IoProxy};
 #[derive(Default)]
 pub struct GraphTranslator {
 }
@@ -90,23 +87,19 @@ impl IoTranslator {
             }
             s::IoEnum::Base64(b64_string) => {
                 //TODO: test and disable slow methods
-                //TODO fix unwrap on base64/hex
-                let bytes = b64_string.as_str().from_base64().unwrap();
+                let bytes = base64::decode(b64_string.as_str())
+                    .map_err(|e| nerror!(ErrorKind::InvalidArgument, "base64: {}", e))?;
                 c.add_copied_input_buffer(io_id, &bytes).map_err(|e| e.at(here!()))
             }
             s::IoEnum::BytesHex(hex_string) => {
-                let bytes = hex_string.as_str().from_hex().unwrap();
+                let bytes = hex::decode(hex_string.as_str()).unwrap();
                 c.add_copied_input_buffer(io_id, &bytes).map_err(|e| e.at(here!()))
             }
             s::IoEnum::Filename(path) => {
 
                 c.add_file(io_id, dir, &path )
             }
-            s::IoEnum::Url(url) => {
-                // TODO: eliminate unwrap
-                let bytes = ::imageflow_helpers::fetching::fetch_bytes(&url).unwrap();
-                c.add_copied_input_buffer(io_id, &bytes).map_err(|e| e.at(here!()))
-            }
+
             s::IoEnum::OutputBuffer |
             s::IoEnum::OutputBase64 => {
                 c.add_output_buffer(io_id).map_err(|e| e.at(here!()))

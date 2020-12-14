@@ -1,10 +1,10 @@
 
 //! Kind of like a routing table for JSON endpoints
 
-use internal_prelude::works_everywhere::*;
+use crate::internal_prelude::works_everywhere::*;
 
-type ResponderFn<'a, T, D> = Box<Fn(&mut T, D) -> Result<s::ResponsePayload> + 'a + Sync>;
-type MethodHandler<'a, T> = Box<Fn(&mut T, &[u8]) -> (JsonResponse, std::result::Result<(), FlowError>) + 'a + Sync>;
+type ResponderFn<'a, T, D> = Box<dyn Fn(&mut T, D) -> Result<s::ResponsePayload> + 'a + Sync + Send>;
+type MethodHandler<'a, T> = Box<dyn Fn(&mut T, &[u8]) -> (JsonResponse, std::result::Result<(), FlowError>) + 'a + Sync + Send>;
 
 #[cfg_attr(feature = "cargo-clippy", allow(new_without_default_derive))] // clippy is broke
 #[derive(Default)]
@@ -185,7 +185,7 @@ impl JsonResponse {
     pub fn fail_with_message(code: i64, message: &str) -> JsonResponse {
         let r = s::Response001 {
             success: false,
-            code: code,
+            code,
             message: Some(message.to_owned()),
             data: s::ResponsePayload::None,
         };
@@ -195,29 +195,3 @@ impl JsonResponse {
         }
     }
 }
-
-
-
-// struct Meh{}
-//
-// #[derive(Deserialize,Clone)]
-// struct Val{
-//    i:i32
-// }
-//
-// fn tryit(){
-//    let mut m = Meh{};
-//    let mut r = MethodRouter::new();
-//    r.add("/api", create_handler_over_responder(
-//       Box::new( move |upon: &mut Meh, v: Val|{
-//           Ok(s::ResponsePayload::None)
-//       })
-//    ));
-// }
-
-// pub fn wrap<T,D>(responder: Box<Fn(&mut T, D) -> Vec<u8>>) -> Box<Fn(&mut T, &[u8]) -> Vec<u8>> where D: serde::Deserialize, D: 'static{
-//    Box::new( move | upon: &mut T, json_request_bytes: & [u8] | {
-//        responder(upon, serde_json::from_slice(json_request_bytes).unwrap())
-//    })
-// }
-//

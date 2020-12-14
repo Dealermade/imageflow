@@ -1,14 +1,14 @@
-use preludes::from_std::*;
+use crate::preludes::from_std::*;
 use std;
 
 use backtrace::{Backtrace, BacktraceFrame};
 use std::panic;
 use std::thread;
 
-use std::sync::{Once, ONCE_INIT};
+use std::sync::{Once};
 
-static CONIDITIONAL_SET: Once = ONCE_INIT;
-static SET_HOOK: Once = ONCE_INIT;
+static CONDITIONAL_SET: Once = Once::new();
+static SET_HOOK: Once = Once::new();
 
 
 ///
@@ -21,7 +21,7 @@ pub fn backtraces_wanted() -> bool{
     }
 }
 pub fn upgrade_panic_hook_once_if_backtraces_wanted(){
-    CONIDITIONAL_SET.call_once(|| {
+    CONDITIONAL_SET.call_once(|| {
         if backtraces_wanted(){
             set_panic_hook_once();
         }

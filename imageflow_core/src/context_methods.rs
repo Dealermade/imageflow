@@ -1,8 +1,8 @@
-use Context;
-use internal_prelude::works_everywhere::*;
-use json::*;
-use parsing::GraphTranslator;
-use parsing::IoTranslator;
+use crate::Context;
+use crate::internal_prelude::works_everywhere::*;
+use crate::json::*;
+use crate::parsing::GraphTranslator;
+use crate::parsing::IoTranslator;
 use std::error;
 
 
@@ -14,15 +14,33 @@ fn create_context_router() -> MethodRouter<'static, Context> {
     //            //Ok(s::ResponsePayload::ImageInfo(job.get_image_info(data.io_id)?))
     //        }
     //    ));
+
     r.add_responder("v0.1/build",
+                    Box::new(move |context: &mut Context, parsed: s::Build001| {
+                        context.build_1(parsed).map_err(|e| e.at(here!()))
+                    }));
+    r.add_responder("v1/build",
                     Box::new(move |context: &mut Context, parsed: s::Build001| {
                         context.build_1(parsed).map_err(|e| e.at(here!()))
                     }));
     r.add_responder("v0.1/get_image_info",
                     Box::new(move |context: &mut Context, data: s::GetImageInfo001| {
-                        Ok(s::ResponsePayload::ImageInfo(context.get_image_info(data.io_id).map_err(|e| e.at(here!()))?))
+                        Ok(s::ResponsePayload::ImageInfo(context.get_unscaled_rotated_image_info(data.io_id).map_err(|e| e.at(here!()))?))
+                    }));
+    r.add_responder("v1/get_image_info",
+                    Box::new(move |context: &mut Context, data: s::GetImageInfo001| {
+                        Ok(s::ResponsePayload::ImageInfo(context.get_unscaled_rotated_image_info(data.io_id).map_err(|e| e.at(here!()))?))
+                    }));
+    r.add_responder("v1/get_scaled_image_info",
+                    Box::new(move |context: &mut Context, data: s::GetImageInfo001| {
+                        Ok(s::ResponsePayload::ImageInfo(context.get_scaled_rotated_image_info(data.io_id).map_err(|e| e.at(here!()))?))
                     }));
     r.add_responder("v0.1/tell_decoder",
+                    Box::new(move |context: &mut Context, data: s::TellDecoder001| {
+                        context.tell_decoder(data.io_id, data.command).map_err(|e| e.at(here!()))?;
+                        Ok(s::ResponsePayload::None)
+                    }));
+    r.add_responder("v1/tell_decoder",
                     Box::new(move |context: &mut Context, data: s::TellDecoder001| {
                         context.tell_decoder(data.io_id, data.command).map_err(|e| e.at(here!()))?;
                         Ok(s::ResponsePayload::None)
@@ -30,6 +48,14 @@ fn create_context_router() -> MethodRouter<'static, Context> {
     r.add_responder("v0.1/execute",
                     Box::new(move |context: &mut Context, parsed: s::Execute001| {
                         context.execute_1(parsed).map_err(|e| e.at(here!()))
+                    }));
+    r.add_responder("v1/execute",
+                    Box::new(move |context: &mut Context, parsed: s::Execute001| {
+                        context.execute_1(parsed).map_err(|e| e.at(here!()))
+                    }));
+    r.add_responder("v1/get_version_info",
+                    Box::new(move |context: &mut Context, data: s::GetVersionInfo| {
+                        Ok(s::ResponsePayload::VersionInfo(context.get_version_info().map_err(|e| e.at(here!()))?))
                     }));
     r.add("brew_coffee",
           Box::new(move |context: &mut Context, bytes: &[u8]| (JsonResponse::teapot(), Ok(()))));
@@ -62,7 +88,7 @@ fn document_message() -> String {
     s.reserve(8000);
     s += "# JSON API - Context\n\n";
     s += "imageflow_context responds to these message methods\n\n";
-    s += "## v0.1/build \n";
+    s += "## v1/build \n";
     s += "Example message body:\n";
     s += &serde_json::to_string_pretty(&s::Build001::example_with_steps()).unwrap();
     s += "\n\nExample response:\n";
@@ -72,7 +98,7 @@ fn document_message() -> String {
                                                                                    "image/png",
                                                                                    "png"))
         .unwrap();
-    s += "## v0.1/get_image_info \n";
+    s += "## v1/get_image_info \n";
     s += "Example message body:\n";
     s += &serde_json::to_string_pretty(&s::GetImageInfo001::example_get_image_info()).unwrap();
     s += "\nExample response:\n";
@@ -80,14 +106,14 @@ fn document_message() -> String {
     s += "\n\n";
 
 
-    s += "## v0.1/tell_decoder \n";
+    s += "## v1/tell_decoder \n";
     s += "Example message body:\n";
     s += &serde_json::to_string_pretty(&s::TellDecoder001::example_hints()).unwrap();
     s += "\nExample response:\n";
     s += &serde_json::to_string_pretty(&s::Response001::example_ok()).unwrap();
     s += "\n\n";
 
-    s += "## v0.1/execute \n";
+    s += "## v1/execute \n";
     s += "Example message body (with graph):\n";
     s += &serde_json::to_string_pretty(&s::Execute001::example_graph()).unwrap();
     s += "Example message body (with linear steps):\n";
@@ -131,9 +157,6 @@ fn test_handler() {
     steps.push(s::Node::Resample2D {
         w: 20,
         h: 30,
-        down_filter: None,
-        up_filter: None,
-        scaling_colorspace: None,
         hints: None,
     });
     steps.push(s::Node::FlipV);
@@ -158,12 +181,13 @@ fn test_handler() {
     });
     steps.push(s::Node::Encode {
         io_id: 1,
-        preset: s::EncoderPreset::LibjpegTurbo { quality: Some(90), optimize_huffman_coding: None, progressive: None },
+        preset: s::EncoderPreset::LibjpegTurbo { quality: Some(90), optimize_huffman_coding: None, progressive: None, matte: None },
     });
 
     let build = s::Build001 {
         builder_config: Some(s::Build001Config {
             graph_recording: None,
+            security:None,
 //            process_all_gif_frames: Some(false),
 //            enable_jpeg_block_scaling: Some(false)
         }),
@@ -172,4 +196,14 @@ fn test_handler() {
     };
 
     let response = Context::create().unwrap().build_1(build);
+}
+
+#[test]
+fn test_get_version_info(){
+    let response = Context::create().unwrap().get_version_info().unwrap();
+
+    assert!(response.build_date.len() > 0);
+    assert!(response.git_describe_always.len() > 0);
+    assert!(response.last_git_commit.len() > 0);
+    assert!(response.long_version_string.len() > 0);
 }

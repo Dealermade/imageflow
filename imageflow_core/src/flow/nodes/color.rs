@@ -12,7 +12,7 @@ pub static COLOR_MATRIX_SRGB_MUTATE: ColorMatrixSrgbMutDef = ColorMatrixSrgbMutD
 #[derive(Debug, Clone)]
 pub struct ColorMatrixSrgbMutDef;
 impl NodeDef for ColorMatrixSrgbMutDef{
-    fn as_one_mutate_bitmap(&self) -> Option<&NodeDefMutateBitmap>{
+    fn as_one_mutate_bitmap(&self) -> Option<&dyn NodeDefMutateBitmap>{
         Some(self)
     }
 }
@@ -20,12 +20,20 @@ impl NodeDefMutateBitmap for ColorMatrixSrgbMutDef{
     fn fqn(&self) -> &'static str{
         "imazen.color_matrix_srgb_mut"
     }
-    fn mutate(&self, c: &Context, bitmap: &mut BitmapBgra,  p: &NodeParams) -> Result<()> {
+    fn mutate(&self, c: &Context, bitmap_key: BitmapKey,  p: &NodeParams) -> Result<()> {
         if let NodeParams::Json(s::Node::ColorMatrixSrgb { ref matrix }) = *p {
             unsafe {
+                let bitmaps = c.borrow_bitmaps()
+                    .map_err(|e| e.at(here!()))?;
+                let mut bitmap_bitmap = bitmaps.try_borrow_mut(bitmap_key)
+                    .map_err(|e| e.at(here!()))?;
+
+                let mut bitmap = bitmap_bitmap.get_window_u8().unwrap().to_bitmap_bgra()?;
+
+
                 let color_matrix_ptrs = matrix.iter().map(|row| row as *const f32).collect::<Vec<*const f32>>();
 
-                if !::ffi::flow_bitmap_bgra_apply_color_matrix(c.flow_c(), bitmap, 0, (*bitmap).h, color_matrix_ptrs.as_ptr()) {
+                if !crate::ffi::flow_bitmap_bgra_apply_color_matrix(c.flow_c(), &mut bitmap, 0, bitmap.h, color_matrix_ptrs.as_ptr()) {
                     return Err(cerror!(c, "Failed to apply color matrix"))
                 }
 
@@ -34,7 +42,7 @@ impl NodeDefMutateBitmap for ColorMatrixSrgbMutDef{
             }
             Ok(())
         } else {
-            Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need ColorMatrixSrgb, got {:?}", p))
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need ColorMatrixSrgb, got {:?}", p))
         }
     }
 }
@@ -43,7 +51,7 @@ impl NodeDefMutateBitmap for ColorMatrixSrgbMutDef{
 #[derive(Debug,Clone)]
 pub struct ColorFilterSrgb;
 impl NodeDef for ColorFilterSrgb{
-    fn as_one_input_expand(&self) -> Option<&NodeDefOneInputExpand>{
+    fn as_one_input_expand(&self) -> Option<&dyn NodeDefOneInputExpand>{
         Some(self)
     }
 }
@@ -53,6 +61,7 @@ impl NodeDefOneInputExpand for ColorFilterSrgb{
     }
     fn expand(&self, ctx: &mut OpCtxMut, ix: NodeIndex, p: NodeParams, parent: FrameInfo) -> Result<()> {
         if let NodeParams::Json(s::Node::ColorFilterSrgb(filter))= p {
+
             let matrix = match filter as s::ColorFilterSrgb {
                 s::ColorFilterSrgb::Sepia => sepia(),
                 s::ColorFilterSrgb::GrayscaleNtsc => grayscale_ntsc(),
@@ -65,11 +74,18 @@ impl NodeDefOneInputExpand for ColorFilterSrgb{
                 s::ColorFilterSrgb::Saturation(a) => saturation(a),
                 s::ColorFilterSrgb::Brightness(a) => brightness(a),
             };
-            ctx.replace_node(ix, vec![Node::n(&COLOR_MATRIX_SRGB_MUTATE,
-                                                NodeParams::Json(s::Node::ColorMatrixSrgb { matrix: matrix }))]);
+            let mut nodes = Vec::new();
+            if let  imageflow_types::ColorFilterSrgb::Alpha(_) = filter{
+                nodes.push(Node::n(&ENABLE_TRANSPARENCY, NodeParams::None));
+
+            }
+            nodes.push(Node::n(&COLOR_MATRIX_SRGB_MUTATE,
+                               NodeParams::Json(s::Node::ColorMatrixSrgb { matrix })));
+
+            ctx.replace_node(ix, nodes);
             Ok(())
         }else{
-            Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need ColorFilterSrgb, got {:?}", p))
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need ColorFilterSrgb, got {:?}", p))
         }
     }
 }

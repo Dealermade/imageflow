@@ -1,6 +1,8 @@
 #include "catch.hpp"
 #include "helpers.h"
 
+extern "C" void keep2() {}
+
 struct flow_bitmap_bgra * crop_window(flow_c * context, struct flow_bitmap_bgra * source, uint32_t x, uint32_t y,
                                       uint32_t w, uint32_t h)
 {
@@ -79,14 +81,14 @@ TEST_CASE("Roundtrip RGB<->LUV 0,0,0,0 ", "[fastscaling]")
     CHECK(bgra[2] == 0.0f);
 }
 
-TEST_CASE("Test guassian blur approximation.", "[fastscaling]")
+TEST_CASE("Test gaussian blur approximation.", "[fastscaling]")
 {
     flow_c context;
     flow_context_initialize(&context);
 
     float sigma = 2.0;
 
-    // We figure this out just for the actual guassian function
+    // We figure this out just for the actual gaussian function
     int kernel_radius
         = int_max(1, (int)ceil(sigma * 3.11513411073090629014797467185716068837128426554157826035269
                                - 0.5)); // Should provide at least 7 bits of precision, and almost always 8.

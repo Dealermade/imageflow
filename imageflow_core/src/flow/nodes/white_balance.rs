@@ -1,4 +1,3 @@
-#[macro_use]
 use super::internal_prelude::*;
 // TODO: someday look into better algorithms - see http://colorconstancy.com/ and http://ipg.fer.hr/ipg/resources/color_constancy
 // http://localhost:39876/ir4/proxy_unsplash/photo-1496264057429-6a331647b69e?a.balancewhite=true&w=800
@@ -47,7 +46,7 @@ fn apply_mappings(bitmap: *mut BitmapBgra, map_red: &[u8], map_green: &[u8], map
     let bytes: &mut [u8] = unsafe { slice::from_raw_parts_mut::<u8>(input.pixels, (input.stride * input.h) as usize) };
 
     if map_red.len() < 256 || map_green.len() < 256 || map_blue.len() < 256{
-        return Err(nerror!(::ErrorKind::InvalidState));
+        return Err(nerror!(crate::ErrorKind::InvalidState));
     }
 
     match input.fmt {
@@ -105,7 +104,7 @@ fn white_balance_srgb_mut(bitmap: *mut BitmapBgra, histograms: &[u64;768], pixel
 #[derive(Debug, Clone)]
 pub struct WhiteBalanceSrgbMutDef;
 impl NodeDef for WhiteBalanceSrgbMutDef{
-    fn as_one_mutate_bitmap(&self) -> Option<&NodeDefMutateBitmap>{
+    fn as_one_mutate_bitmap(&self) -> Option<&dyn NodeDefMutateBitmap>{
         Some(self)
     }
 }
@@ -113,18 +112,27 @@ impl NodeDefMutateBitmap for WhiteBalanceSrgbMutDef{
     fn fqn(&self) -> &'static str{
         "imazen.white_balance_srgb_mut"
     }
-    fn mutate(&self, c: &Context, bitmap: &mut BitmapBgra,  p: &NodeParams) -> Result<()> {
+    fn mutate(&self, c: &Context, bitmap_key: BitmapKey,  p: &NodeParams) -> Result<()> {
 
         unsafe {
+
+            let bitmaps = c.borrow_bitmaps()
+                .map_err(|e| e.at(here!()))?;
+            let mut bitmap_bitmap = bitmaps.try_borrow_mut(bitmap_key)
+                .map_err(|e| e.at(here!()))?;
+
+            let mut bitmap = bitmap_bitmap.get_window_u8().unwrap().to_bitmap_bgra()?;
+
+
             let mut histograms: [u64; 768] = [0; 768];
             let mut pixels_sampled: u64 = 0;
-            if !::ffi::flow_bitmap_bgra_populate_histogram(c.flow_c(), bitmap as *mut BitmapBgra, histograms.as_mut_ptr(), 256, 3, &mut pixels_sampled as *mut u64) {
+            if !crate::ffi::flow_bitmap_bgra_populate_histogram(c.flow_c(), &mut bitmap as *mut BitmapBgra, histograms.as_mut_ptr(), 256, 3, &mut pixels_sampled as *mut u64) {
                 return Err(cerror!(c, "Failed to populate histogram"))
             }
             if let NodeParams::Json(s::Node::WhiteBalanceHistogramAreaThresholdSrgb { threshold }) = *p {
-                white_balance_srgb_mut(bitmap, &histograms, pixels_sampled, threshold, threshold)
+                white_balance_srgb_mut(&mut bitmap, &histograms, pixels_sampled, threshold, threshold)
             } else {
-                Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need ColorMatrixSrgb, got {:?}", p))
+                Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need ColorMatrixSrgb, got {:?}", p))
             }
         }
 

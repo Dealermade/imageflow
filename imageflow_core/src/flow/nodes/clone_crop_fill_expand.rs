@@ -1,4 +1,5 @@
 use super::internal_prelude::*;
+use crate::graphics::bitmaps::BitmapCompositing;
 
 
 pub static COPY_RECT: CopyRectNodeDef = CopyRectNodeDef{};
@@ -7,14 +8,15 @@ pub static CROP: MutProtect<CropMutNodeDef> = MutProtect{node: &CROP_MUTATE, fqn
 pub static CROP_MUTATE: CropMutNodeDef = CropMutNodeDef{};
 pub static CLONE: CloneDef = CloneDef{};
 pub static EXPAND_CANVAS: ExpandCanvasDef = ExpandCanvasDef{};
-//pub static CROP_WHITESPACE: CropWhitespaceDef = CropWhitespaceDef{};
-
+pub static CROP_WHITESPACE: CropWhitespaceDef = CropWhitespaceDef{};
+pub static REGION_PERCENT: RegionPercentDef = RegionPercentDef {};
+pub static REGION: RegionDef = RegionDef {};
 
 #[derive(Debug, Clone)]
 pub struct CopyRectNodeDef;
 
 impl NodeDef for CopyRectNodeDef {
-    fn as_one_input_one_canvas(&self) -> Option<&NodeDefOneInputOneCanvas> {
+    fn as_one_input_one_canvas(&self) -> Option<&dyn NodeDefOneInputOneCanvas> {
         Some(self)
     }
 }
@@ -27,58 +29,52 @@ impl NodeDefOneInputOneCanvas for CopyRectNodeDef{
         Ok(())
     }
 
-    fn render(&self, c: &Context, canvas: &mut BitmapBgra, input: &mut BitmapBgra,  p: &NodeParams) -> Result<()> {
-        if let NodeParams::Json(s::Node::CopyRectToCanvas { from_x, from_y, width, height, x, y }) = *p {
+    fn render(&self, c: &Context, canvas_key: BitmapKey, input_key: BitmapKey,  p: &NodeParams) -> Result<()> {
+        if let NodeParams::Json(s::Node::CopyRectToCanvas { from_x, from_y,  w, h, x, y }) = *p {
 
-
-            if input.fmt != canvas.fmt {
-                return Err(nerror!(::ErrorKind::InvalidNodeConnections, "Canvas pixel format {:?} differs from Input pixel format {:?}.", input.fmt, canvas.fmt));
+            if input_key == canvas_key {
+                return Err(nerror!(crate::ErrorKind::InvalidNodeConnections, "Canvas and Input are the same bitmap!"));
             }
-            if input == canvas {
-                return Err(nerror!(::ErrorKind::InvalidNodeConnections, "Canvas and Input are the same bitmap!"));
-            }
+            let bitmaps = c.bitmaps.try_borrow()
+                .map_err(|e| nerror!(ErrorKind::FailedBorrow))?;
+            let mut canvas_bitmap = bitmaps
+                .get(canvas_key).ok_or_else(|| nerror!(ErrorKind::BitmapKeyNotFound))?
+                .try_borrow_mut()
+                .map_err(|e| nerror!(ErrorKind::FailedBorrow))?;
 
-            if input.w <= from_x || input.h <= from_y ||
-                input.w < from_x + width ||
-                input.h < from_y + height ||
-                canvas.w < x + width ||
-                canvas.h < y + height {
-                return Err(nerror!(::ErrorKind::InvalidNodeParams, "Invalid coordinates. Canvas is {}x{}, Input is {}x{}, Params provided: {:?}",
-                         canvas.w,
-                         canvas.h,
-                         input.w,
-                         input.h,
+            let mut canvas_bgra = unsafe {
+                canvas_bitmap.get_window_u8().unwrap().to_bitmap_bgra()?
+            };
+
+            let mut input_bitmap = bitmaps
+                .get(input_key).ok_or_else(|| nerror!(ErrorKind::BitmapKeyNotFound))?
+                .try_borrow_mut()
+                .map_err(|e| nerror!(ErrorKind::FailedBorrow))?;
+
+            let mut input_bgra = unsafe {
+                input_bitmap.get_window_u8().unwrap().to_bitmap_bgra()?
+            };
+
+            if input_bgra.w <= from_x || input_bgra.h <= from_y ||
+                input_bgra.w < from_x + w ||
+                input_bgra.h < from_y + h ||
+                canvas_bgra.w < x + w ||
+                canvas_bgra.h < y + h {
+                return Err(nerror!(crate::ErrorKind::InvalidNodeParams, "Invalid coordinates. Canvas is {}x{}, Input is {}x{}, Params provided: {:?}",
+                         canvas_bgra.w,
+                         canvas_bgra.h,
+                         input_bgra.w,
+                         input_bgra.h,
                          p));
             }
-            canvas.compositing_mode = ::ffi::BitmapCompositingMode::BlendWithSelf;
+            crate::graphics::copy_rect::copy_rect(&mut input_bgra, &mut canvas_bgra, from_x, from_y, x, y, w, h)?;
 
-            let bytes_pp = input.fmt.bytes() as u32;
-            if from_x == 0 && x == 0 && width == input.w && width == canvas.w &&
-                input.stride == canvas.stride {
-                //This optimization has the side effect of copying irrelevant data, so we don't want to do it if windowed, only
-                // if padded or permanently cropped.
-                unsafe {
-                    let from_offset = input.stride * from_y;
-                    let from_ptr = input.pixels.offset(from_offset as isize);
-                    let to_offset = canvas.stride * y;
-                    let to_ptr = canvas.pixels.offset(to_offset as isize);
-                    ptr::copy_nonoverlapping(from_ptr, to_ptr, (input.stride * height) as usize);
-                }
-            } else {
-                for row in 0..height {
-                    unsafe {
-                        let from_offset = input.stride * (from_y + row) + bytes_pp * from_x;
-                        let from_ptr = input.pixels.offset(from_offset as isize);
-                        let to_offset = canvas.stride * (y + row) + bytes_pp * x;
-                        let to_ptr = canvas.pixels.offset(to_offset as isize);
 
-                        ptr::copy_nonoverlapping(from_ptr, to_ptr, (width * bytes_pp) as usize);
-                    }
-                }
-            }
+            canvas_bitmap.set_compositing(BitmapCompositing::BlendWithSelf);
+
             Ok(())
         } else {
-            Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need CopyRectToCanvas, got {:?}", p))
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need CopyRectToCanvas, got {:?}", p))
         }
     }
 }
@@ -87,7 +83,7 @@ impl NodeDefOneInputOneCanvas for CopyRectNodeDef{
 #[derive(Debug, Clone)]
 pub struct FillRectNodeDef;
 impl NodeDef for FillRectNodeDef{
-    fn as_one_mutate_bitmap(&self) -> Option<&NodeDefMutateBitmap>{
+    fn as_one_mutate_bitmap(&self) -> Option<&dyn NodeDefMutateBitmap>{
         Some(self)
     }
 }
@@ -98,32 +94,38 @@ impl NodeDefMutateBitmap for FillRectNodeDef {
     fn validate_params(&self, p: &NodeParams) -> Result<()> {
         Ok(())
     }
-    fn mutate(&self, c: &Context, bitmap: &mut BitmapBgra,  p: &NodeParams) -> Result<()>{
+    fn mutate(&self, c: &Context, bitmap_key: BitmapKey,  p: &NodeParams) -> Result<()>{
         if let NodeParams::Json(s::Node::FillRect { x1, x2, y1, y2, ref color }) = *p{
 
-            if x2 <= x1 || y2 <= y1 || (x1 as i32) < 0 || (y1 as i32) < 0 || x2 > bitmap.w || y2 > bitmap.h{
-               return Err(nerror!(::ErrorKind::InvalidCoordinates, "Invalid coordinates for {}x{} bitmap: {:?}", bitmap.w, bitmap.h, p));
-            }
+            let bitmaps = c.borrow_bitmaps()
+                .map_err(|e| e.at(here!()))?;
+            let mut bitmap = bitmaps.try_borrow_mut(bitmap_key)
+                .map_err(|e| e.at(here!()))?;
 
-            bitmap.compositing_mode = ::ffi::BitmapCompositingMode::BlendWithSelf;
+            bitmap.set_compositing(BitmapCompositing::BlendWithSelf);
+
             unsafe {
 
-                if !ffi::flow_bitmap_bgra_fill_rect(c.flow_c(),
-                                                    bitmap as *mut BitmapBgra,
+                if x2 <= x1 || y2 <= y1 || (x1 as i32) < 0 || (y1 as i32) < 0 || x2 > bitmap.w() || y2 > bitmap.h(){
+                    return Err(nerror!(crate::ErrorKind::InvalidCoordinates, "Invalid coordinates for {}x{} bitmap: {:?}", bitmap.w(), bitmap.h(), p));
+                }
+
+
+                let mut bitmap_bgra = bitmap.get_window_u8().unwrap().to_bitmap_bgra()?;
+
+
+                crate::graphics::fill::flow_bitmap_bgra_fill_rect(
+                                                    &mut bitmap_bgra,
                                                     x1,
                                                     y1,
                                                     x2,
                                                     y2,
-                                                    color.clone().to_u32_bgra().unwrap()) {
-                    return Err(cerror!(c, "Failed to fill rectangle"))
-                }else{
-                    Ok(())
-                }
-
+                                                    color.clone().to_u32_bgra().unwrap())
+                    .map_err(|e| e.at(here!()))?;
             }
-
+            Ok(())
         } else {
-            Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need FillRect, got {:?}", p))
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need FillRect, got {:?}", p))
         }
     }
 }
@@ -132,7 +134,7 @@ impl NodeDefMutateBitmap for FillRectNodeDef {
 #[derive(Debug,Clone)]
 pub struct CloneDef;
 impl NodeDef for CloneDef{
-    fn as_one_input_expand(&self) -> Option<&NodeDefOneInputExpand>{
+    fn as_one_input_expand(&self) -> Option<&dyn NodeDefOneInputExpand>{
         Some(self)
     }
 }
@@ -154,8 +156,8 @@ impl NodeDefOneInputExpand for CloneDef{
             from_y: 0,
             x: 0,
             y: 0,
-            width: parent.w as u32,
-            height: parent.h as u32,
+            w: parent.w as u32,
+            h: parent.h as u32,
         };
         let canvas = ctx.graph
             .add_node(Node::n(&CREATE_CANVAS, NodeParams::Json(canvas_params)));
@@ -171,7 +173,7 @@ impl NodeDefOneInputExpand for CloneDef{
 #[derive(Debug,Clone)]
 pub struct ExpandCanvasDef;
 impl NodeDef for ExpandCanvasDef{
-    fn as_one_input_expand(&self) -> Option<&NodeDefOneInputExpand>{
+    fn as_one_input_expand(&self) -> Option<&dyn NodeDefOneInputExpand>{
         Some(self)
     }
 }
@@ -180,16 +182,20 @@ impl NodeDefOneInputExpand for ExpandCanvasDef{
         "imazen.expand_canvas"
     }
     fn estimate(&self, p: &NodeParams, input: FrameEstimate) -> Result<FrameEstimate> {
-        if let NodeParams::Json(s::Node::ExpandCanvas { left, top, bottom, right, ref color }) = *p {
+        if let NodeParams::Json(imageflow_types::Node::ExpandCanvas { left, top, bottom, right, ref color }) = *p {
             input.map_frame( |info| {
                 Ok(FrameInfo {
                     w: info.w + left as i32 + right as i32,
                     h: info.h + top as i32 + bottom as i32,
-                    fmt: ffi::PixelFormat::from(info.fmt)
+                    fmt: if color.is_opaque() {
+                        ffi::PixelFormat::from(info.fmt)
+                    } else{
+                        PixelFormat::Bgra32
+                    }
                 })
             })
         } else {
-            Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need ExpandCanvas, got {:?}", p))
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need ExpandCanvas, got {:?}", p))
         }
     }
 
@@ -202,7 +208,11 @@ impl NodeDefOneInputExpand for ExpandCanvasDef{
             let canvas_params = s::Node::CreateCanvas {
                 w: new_w as usize,
                 h: new_h as usize,
-                format: s::PixelFormat::from(fmt),
+                format: if color.is_opaque() {
+                    ffi::PixelFormat::from(fmt)
+                } else{
+                    PixelFormat::Bgra32
+                },
                 color: color.clone(),
             };
             let copy_params = s::Node::CopyRectToCanvas {
@@ -210,8 +220,8 @@ impl NodeDefOneInputExpand for ExpandCanvasDef{
                 from_y: 0,
                 x: left,
                 y: top,
-                width: w as u32,
-                height: h as u32,
+                w: w as u32,
+                h: h as u32,
             };
             let canvas = ctx.graph
                 .add_node(Node::n(&CREATE_CANVAS,
@@ -222,12 +232,164 @@ impl NodeDefOneInputExpand for ExpandCanvasDef{
             ctx.replace_node_with_existing(ix, copy);
             Ok(())
         } else {
-            Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need ExpandCanvas, got {:?}", p))
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need ExpandCanvas, got {:?}", p))
         }
     }
 }
 
+#[derive(Debug,Clone)]
+pub struct RegionPercentDef;
+impl RegionPercentDef {
+    fn get_coords(info:FrameInfo, left: f32, top: f32, right: f32, bottom: f32) -> (i32,i32,i32,i32){
+        let (x1, y1, mut x2, mut y2) =
+            ((info.w as f32 * left / 100f32).round() as i32,
+            (info.h as f32 * top / 100f32).round() as i32,
+            (info.w as f32 * right / 100f32).round() as i32,
+             (info.h as f32 * bottom / 100f32).round() as i32);
+        //Round up to 1px if our percentages land on the same pixel
+        if x2 < x1 {
+            x2 = x1 + 1;
+        }
+        if y2 < y1{
+            y2 = y1 + 1;
+        }
+        //eprintln!("{}x{} {},{},{},{} -> {},{},{},{}", info.w, info.h, left, top, right, bottom, x1,y1,x2,y2);
+        return (x1,y1,x2,y2);
 
+    }
+}
+impl NodeDef for RegionPercentDef {
+    fn as_one_input_expand(&self) -> Option<&dyn NodeDefOneInputExpand>{
+        Some(self)
+    }
+}
+impl NodeDefOneInputExpand for RegionPercentDef {
+    fn fqn(&self) -> &'static str {
+        "imazen.region_percent"
+    }
+    fn estimate(&self, p: &NodeParams, input: FrameEstimate) -> Result<FrameEstimate> {
+        if let NodeParams::Json(imageflow_types::Node::RegionPercent { x1, y1, x2, y2, ref background_color }) = *p {
+            input.map_frame(|info| {
+                let (x1, y1, x2, y2) = RegionPercentDef::get_coords(info, x1, y1, x2, y2);
+                Ok(FrameInfo {
+                    w: x2 - x1,
+                    h: y2 - y1,
+                    fmt: ffi::PixelFormat::from(info.fmt)
+                })
+            })
+        } else {
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need RegionPercent, got {:?}", p))
+        }
+    }
+    //TODO: If we want to support transparency on jpeg inputs we have to fix expand_canvas and copy_rect too
+    fn expand(&self, ctx: &mut OpCtxMut, ix: NodeIndex, p: NodeParams, input: FrameInfo) -> Result<()> {
+        if let NodeParams::Json(imageflow_types::Node::RegionPercent { x1: left, y1: top, y2: bottom, x2: right, background_color }) = p {
+            if bottom <= top || right <= left {
+                return Err(nerror!(crate::ErrorKind::InvalidNodeParams, "Invalid coordinates: {},{} {},{} should describe the top-left and bottom-right corners of the region in percentages. Not a rectangle.", left, top, right, bottom));
+            }
+
+            let (x1, y1, x2, y2) = RegionPercentDef::get_coords(input, left, top, right, bottom);
+
+            let region_params = imageflow_types::Node::Region {
+                x1,
+                y1,
+                x2,
+                y2,
+                background_color: background_color.clone()
+            };
+
+            //First crop, then expand
+            ctx.replace_node(ix, vec![
+                Node::n(&REGION,
+                        NodeParams::Json(region_params)),
+            ]);
+
+
+            Ok(())
+        } else {
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need RegionPercent, got {:?}", p))
+        }
+    }
+}
+
+#[derive(Debug,Clone)]
+pub struct RegionDef;
+impl NodeDef for RegionDef {
+    fn as_one_input_expand(&self) -> Option<&dyn NodeDefOneInputExpand>{
+        Some(self)
+    }
+}
+impl NodeDefOneInputExpand for RegionDef {
+    fn fqn(&self) -> &'static str{
+        "imazen.region"
+    }
+    fn estimate(&self, p: &NodeParams, input: FrameEstimate) -> Result<FrameEstimate> {
+        if let NodeParams::Json(imageflow_types::Node::Region { x1, y1, x2, y2, ref background_color }) = *p {
+            input.map_frame( |info| {
+                if y2 <= y1 || x2 <= x1 {
+                    return Err(nerror!(crate::ErrorKind::InvalidNodeParams, "Invalid coordinates: {},{} {},{} should describe the top-left and bottom-right corners of the region in pixels. Not a rectangle.", x1, y1, x2, y2));
+                }
+                Ok(FrameInfo {
+                    w: x2 - x1,
+                    h: y2 - y1,
+                    fmt: ffi::PixelFormat::from(info.fmt)
+                })
+            })
+        } else {
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need Region, got {:?}", p))
+        }
+    }
+    //TODO: If we want to support transparency on jpeg inputs we have to fix expand_canvas and copy_rect too
+    fn expand(&self, ctx: &mut OpCtxMut, ix: NodeIndex, p: NodeParams, input: FrameInfo) -> Result<()>{
+        if let NodeParams::Json(imageflow_types::Node::Region { x1, y1, y2, x2, background_color }) = p {
+            if y2 <= y1 || x2 <= x1 {
+                return Err(nerror!(crate::ErrorKind::InvalidNodeParams, "Invalid coordinates: {},{} {},{} should describe the top-left and bottom-righ corners of the region in pixels. Not a rectangle.", x1, y1, x2, y2));
+            }
+
+            if x1 >= input.w || y1 >= input.h || x2 <= 0 || y2 <= 0{
+                // No cropping of input image, we just create a canvas
+                let canvas_params = s::Node::CreateCanvas {
+                    w: (x2-x1) as usize,
+                    h: (y2-y1) as usize,
+                    format: s::PixelFormat::from(input.fmt),
+                    color: background_color.clone(),
+                };
+                let canvas = ctx.graph
+                    .add_node(Node::n(&CREATE_CANVAS,
+                                      NodeParams::Json(canvas_params)));
+
+                ctx.copy_edges_to(ix, canvas, EdgeDirection::Outgoing);
+                ctx.graph.remove_node(ix).unwrap();
+            }else{
+                let crop_params = imageflow_types::Node::Crop {
+                    x1: i32::min(input.w, i32::max(0,x1)) as u32,
+                    y1: i32::min(input.h, i32::max(0,y1)) as u32,
+                    x2: i32::min(input.w, i32::max(0,x2)) as u32,
+                    y2: i32::min(input.h, i32::max(0,y2)) as u32
+                };
+                let expand_params = imageflow_types::Node::ExpandCanvas {
+                    left: i32::max(0, 0 - x1)  as u32,
+                    top: i32::max(0, 0 - y1)  as u32,
+                    right: i32::max(0, x2 - input.w) as u32,
+                    bottom: i32::max(0, y2 - input.h) as u32,
+                    color: background_color.clone()
+                };
+
+                //First crop, then expand
+                ctx.replace_node(ix, vec![
+                    Node::n(&CROP,
+                            NodeParams::Json(crop_params)),
+                    Node::n(&EXPAND_CANVAS,
+                            NodeParams::Json(expand_params)),
+                ]);
+            }
+
+            Ok(())
+        } else {
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need Region, got {:?}", p))
+        }
+    }
+}
 #[derive(Debug, Clone)]
 pub struct CropMutNodeDef;
 
@@ -235,10 +397,10 @@ impl CropMutNodeDef {
     fn est_validate(&self, p: &NodeParams, input_est: FrameEstimate) -> Result<FrameEstimate> {
         if let NodeParams::Json(s::Node::Crop {  x1,  y1,  x2,  y2 }) = *p {
             if (x1 as i32) < 0 || (y1 as i32) < 0 || x2 <= x1 || y2 <= y1 {
-                Err(nerror!(::ErrorKind::InvalidNodeParams, "Invalid coordinates: {},{} {},{} should describe the top-left and bottom-right corners of a rectangle", x1,y1,x2,y2))
+                Err(nerror!(crate::ErrorKind::InvalidNodeParams, "Invalid coordinates: {},{} {},{} should describe the top-left and bottom-right corners of a rectangle", x1,y1,x2,y2))
             } else if let FrameEstimate::Some(input) = input_est {
                 if x2 > input.w as u32 || y2 > input.h as u32 {
-                    Err(nerror!(::ErrorKind::InvalidNodeParams, "Crop coordinates {},{} {},{} invalid for {}x{} bitmap", x1,y1,x2,y2, input.w, input.h))
+                    Err(nerror!(crate::ErrorKind::InvalidNodeParams, "Crop coordinates {},{} {},{} invalid for {}x{} bitmap", x1,y1,x2,y2, input.w, input.h))
                 } else {
                     Ok(FrameEstimate::Some(FrameInfo {
                         w: x2 as i32 - x1 as i32,
@@ -251,7 +413,7 @@ impl CropMutNodeDef {
                 Ok(FrameEstimate::None)
             }
         } else {
-            Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need Crop, got {:?}", p))
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need Crop, got {:?}", p))
         }
     }
 }
@@ -277,85 +439,93 @@ impl NodeDef for CropMutNodeDef{
     fn can_execute(&self) -> bool { true }
 
     fn execute(&self, ctx: &mut OpCtxMut, ix: NodeIndex) -> Result<NodeResult> {
-        let input = unsafe {
-            &mut *ctx.bitmap_bgra_from(ix, EdgeKind::Input).map_err(|e| e.at(here!()).with_ctx_mut(ctx, ix))?
-        };
-        ctx.consume_parent_result(ix, EdgeKind::Input)?;
-
-        // Validate against actual bitmap
-        let _ = self.est_validate(&ctx.weight(ix).params, FrameEstimate::Some(input.frame_info())).map_err(|e| e.at(here!()))?;
-
         if let NodeParams::Json(s::Node::Crop { x1, x2, y1, y2 }) = ctx.weight(ix).params {
-            // println!("Cropping {}x{} to ({},{}) ({},{})", (*input).w, (*input).h, x1, y1, x2, y2);
 
-            let (w, h) = (input.w, input.h);
-            if x2 <= x1 || y2 <= y1 || x2 > w || y2 > h {
-                panic!("Invalid crop bounds {:?} (image {}x{})", ((x1, y1), (x2, y2)), w, h);
+            let bitmap_key = ctx.bitmap_key_from(ix, EdgeKind::Input)
+                .map_err(|e| e.at(here!()).with_ctx_mut(ctx, ix))?;
+
+            {
+                let bitmaps = ctx.c.borrow_bitmaps()
+                    .map_err(|e| e.at(here!()))?;
+                let mut bitmap = bitmaps.try_borrow_mut(bitmap_key)
+                    .map_err(|e| e.at(here!()))?;
+
+                // Validate against actual bitmap
+                let _ = self.est_validate(&ctx.weight(ix).params,
+                                          FrameEstimate::Some(bitmap.frame_info()))
+                    .map_err(|e| e.at(here!()))?;
+
+                bitmap.crop(x1, y1, x2, y2)
+                    .map_err(|e| e.at(here!()))?;
             }
 
-
-            unsafe {
-                let offset = input.stride as isize * y1 as isize +
-                    input.fmt.bytes() as isize * x1 as isize;
-                input.pixels = input.pixels.offset(offset);
-            }
-            input.w = x2 - x1;
-            input.h = y2 - y1;
+            ctx.consume_parent_result(ix, EdgeKind::Input)?;
 
 
-            Ok(NodeResult::Frame(input))
+            Ok(NodeResult::Frame(bitmap_key))
         } else {
-            Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need Crop, got {:?}", &ctx.weight(ix).params))
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need Crop, got {:?}", &ctx.weight(ix).params))
         }
     }
 }
-//
-//#[derive(Debug,Clone)]
-//pub struct CropWhitespaceDef;
-//impl NodeDef for CropWhitespaceDef{
-//    fn as_one_input_expand(&self) -> Option<&NodeDefOneInputExpand>{
-//        Some(self)
-//    }
-//}
-//impl NodeDefOneInputExpand for CropWhitespaceDef {
-//    fn fqn(&self) -> &'static str {
-//        "imazen.crop_whitespace"
-//    }
-//    fn estimate(&self, p: &NodeParams, input: FrameEstimate) -> Result<FrameEstimate> {
-//        Ok((FrameEstimate::Impossible))
-//    }
-////TODO: mark as risky
-//    fn expand(&self, ctx: &mut OpCtxMut, ix: NodeIndex, p: NodeParams, b: FrameInfo) -> Result<()> {
-//        // detect bounds, increase, and replace with crop
-//        if let NodeParams::Json(s::Node::CropWhitespace { threshold, percent_padding }) = p {
-//            // detect bounds, increase, and replace with crop
-//            let (x1, y1, x2, y2) = match ctx.first_parent_input_weight(ix).unwrap().result {
-//                NodeResult::Frame(b) => {
-//                    unsafe {
-//                        let rect = ::ffi::detect_content(ctx.c.flow_c(), b, threshold);
-//                        if rect == ::ffi::Rect::failure(){
-//                            return Err(cerror!(ctx.c, "Failed to complete whitespace detection"));
-//                        }
-//                        if rect.x2 <= rect.x1 || rect.y2 <= rect.y1{
-//                            return Err(nerror!(::ErrorKind::InvalidState, "Whitespace detection returned invalid rectangle"));
-//                        }
-//                        let padding = (percent_padding * (rect.x2 - rect.x1 + rect.y2 - rect.y1) as f32 / 2f32).ceil() as i32;
-//                        Ok((cmp::max(0, rect.x1 - padding) as u32, cmp::max(0, rect.y1 - padding) as u32,
-//                            cmp::min((*b).w as i32, rect.x2 + padding) as u32, cmp::min((*b).h as i32, rect.y2 + padding) as u32))
-//                    }
-//                },
-//                other => { Err(nerror!(::ErrorKind::InvalidOperation, "Cannot CropWhitespace without a parent bitmap; got {:?}", other)) }
-//            }?;
-//            ctx.replace_node(ix, vec![
-//                Node::n(&CROP,
-//                        NodeParams::Json(s::Node::Crop { x1: x1, y1: y1, x2: x2, y2: y2 }))
-//            ]);
-//
-//
-//            Ok(())
-//        } else {
-//            Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need CropWhitespace, got {:?}", p))
-//        }
-//    }
-//}
-//
+
+#[derive(Debug,Clone)]
+pub struct CropWhitespaceDef;
+impl NodeDef for CropWhitespaceDef{
+    fn as_one_input_expand(&self) -> Option<&dyn NodeDefOneInputExpand>{
+        Some(self)
+    }
+}
+impl NodeDefOneInputExpand for CropWhitespaceDef {
+    fn fqn(&self) -> &'static str {
+        "imazen.crop_whitespace"
+    }
+    fn estimate(&self, p: &NodeParams, input: FrameEstimate) -> Result<FrameEstimate> {
+        Ok(FrameEstimate::Impossible)
+    }
+
+    fn expand(&self, ctx: &mut OpCtxMut, ix: NodeIndex, p: NodeParams, b: FrameInfo) -> Result<()> {
+        // detect bounds, increase, and replace with crop
+        if let NodeParams::Json(s::Node::CropWhitespace { threshold, percent_padding }) = p {
+            // detect bounds, increase, and replace with crop
+            let (x1, y1, x2, y2) = match ctx.first_parent_input_weight(ix).unwrap().result {
+                NodeResult::Frame(bitmap_key) => {
+
+                    let bitmaps = ctx.c.borrow_bitmaps()
+                        .map_err(|e| e.at(here!()))?;
+                    let mut bitmap = bitmaps.try_borrow_mut(bitmap_key)
+                        .map_err(|e| e.at(here!()))?;
+
+                    unsafe {
+                        let frame = bitmap.get_window_u8()
+                            .ok_or_else(|| nerror!(ErrorKind::InvalidBitmapType))?
+                            .to_bitmap_bgra().map_err(|e| e.at(here!()))?;
+
+
+                        if let Some(rect) = crate::graphics::whitespace::detect_content(&frame, threshold) {
+                            if rect.x2 <= rect.x1 || rect.y2 <= rect.y1 {
+                                return Err(nerror!(crate::ErrorKind::InvalidState, "Whitespace detection returned invalid rectangle"));
+                            }
+                            let padding = (percent_padding * (rect.x2 - rect.x1 + rect.y2 - rect.y1) as f32 / 2f32).ceil() as i64;
+                            Ok((cmp::max(0, rect.x1 as i64 - padding) as u32, cmp::max(0, rect.y1 as i64 - padding) as u32,
+                                cmp::min(bitmap.w() as i64, rect.x2 as i64 + padding) as u32, cmp::min(bitmap.h() as i64, rect.y2 as i64 + padding) as u32))
+                        } else {
+                            return Err(nerror!(crate::ErrorKind::InvalidState, "Failed to complete whitespace detection"));
+                        }
+                    }
+                },
+                other => { Err(nerror!(crate::ErrorKind::InvalidOperation, "Cannot CropWhitespace without a parent bitmap; got {:?}", other)) }
+            }?;
+            ctx.replace_node(ix, vec![
+                Node::n(&CROP,
+                        NodeParams::Json(s::Node::Crop { x1, y1, x2, y2 }))
+            ]);
+
+
+            Ok(())
+        } else {
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need CropWhitespace, got {:?}", p))
+        }
+    }
+}
+

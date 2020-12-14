@@ -109,7 +109,7 @@
 //! For all APIS: You'll likely segfault the process if you provide a `context` pointer that is dangling or invalid.
 //!
 #![crate_type = "cdylib"]
-#![feature(core_intrinsics)]
+#![cfg_attr(feature = "nightly", feature(core_intrinsics))]
 
 // These functions are not for use from Rust, so marking them unsafe just reduces compile-time verification and safety
 #![cfg_attr(feature = "cargo-clippy", allow(not_unsafe_ptr_arg_deref))]
@@ -122,20 +122,19 @@ extern crate imageflow_core as c;
 extern crate libc;
 extern crate smallvec;
 extern crate backtrace;
-use c::ffi;
 
-pub use c::{Context, ErrorCategory};
-pub use c::ffi::ImageflowJsonResponse as JsonResponse;
+pub use crate::c::{Context, ErrorCategory};
+pub use crate::c::ffi::ImageflowJsonResponse as JsonResponse;
 //use c::IoDirection;
-use c::{ErrorKind, CodeLocation, FlowError};
+use crate::c::{ErrorKind, CodeLocation, FlowError};
 use std::ptr;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 #[cfg(test)]
 use std::str;
 
 
-///
-/// What is possible with the IO object
+//
+// What is possible with the IO object
 //#[repr(C)]
 //pub enum IoMode {
 //    None = 0,
@@ -146,7 +145,7 @@ use std::str;
 //    ReadWriteSeekable = 15, // 1 | 2 | 4 | 8
 //}
 
-/// Input or output?
+// Input or output?
 //#[repr(C)]
 //#[derive(Copy,Clone)]
 //pub enum Direction {
@@ -177,18 +176,23 @@ macro_rules! static_char {
     }
 }
 
+
 fn type_name_of<T>(_: T) -> &'static str {
     extern crate core;
-    unsafe { core::intrinsics::type_name::<T>() }
+    std::any::type_name::<T>()
+}
+
+fn parent_function_name<T>(f: T) -> &'static str {
+    let name = type_name_of(f);
+    &name[..name.len() - 3].rsplit_terminator(":").next().unwrap_or("[function name not found]")
 }
 
 macro_rules! context {
     ($ptr:ident) => {{
         if $ptr.is_null() {
             fn f() {}
-            let name = type_name_of(f);
-            let shortname = &name[..name.len() - 4].rsplit_terminator(":").next().unwrap_or("[function name not found]");
-            eprintln!("Null context pointer provided to {}. Terminating process.", shortname);
+            let name = parent_function_name(f);
+            eprintln!("Null context pointer provided to {}. Terminating process.", name);
             let bt = ::backtrace::Backtrace::new();
             eprintln!("{:?}", bt);
             ::std::process::abort();
@@ -201,21 +205,19 @@ macro_rules! context_ready {
     ($ptr:ident) => {{
         if $ptr.is_null() {
             fn f() {}
-            let name = type_name_of(f);
-            let shortname = &name[..name.len() - 4].rsplit_terminator(":").next().unwrap_or("[function name not found]");
-            eprintln!("Null context pointer provided to {}. Terminating process.", shortname);
+            let name = parent_function_name(f);
+            eprintln!("Null context pointer provided to {}. Terminating process.", name);
             let bt = ::backtrace::Backtrace::new();
             eprintln!("{:?}", bt);
             ::std::process::abort();
         }else if unsafe{(&*$ptr)}.outward_error().has_error(){
             fn f() {}
-            let name = type_name_of(f);
-            let shortname = &name[..name.len() - 4].rsplit_terminator(":").next().unwrap_or("[function name not found]");
-            eprintln!("The Context passed to {} is in an error state and cannot be used. Terminating process.", shortname);
+            let name = parent_function_name(f);
+            eprintln!("The Context passed to {} is in an error state and cannot be used. Terminating process.", name);
             eprintln!("{}",unsafe{(&*$ptr)}.outward_error());
 
             let bt = ::backtrace::Backtrace::new();
-            eprintln!("{} was invoked by: \n{:?}", shortname, bt);
+            eprintln!("{} was invoked by: \n{:?}", name, bt);
             ::std::process::abort();
         }
         (unsafe{&mut *$ptr})
@@ -308,6 +310,8 @@ pub extern "C" fn imageflow_context_destroy(context: *mut Context) {
 fn test_create_destroy() {
     exercise_create_destroy();
 }
+
+
 
 pub fn exercise_create_destroy() {
     let c = imageflow_context_create(IMAGEFLOW_ABI_VER_MAJOR, IMAGEFLOW_ABI_VER_MINOR);
@@ -407,7 +411,7 @@ pub extern "C" fn imageflow_context_error_write_to_buffer(context: *mut Context,
     if buffer.is_null(){
         false
     }else {
-        use c::errors::writing_to_slices::WriteResult;
+        use crate::c::errors::writing_to_slices::WriteResult;
         let c = context!(context);
 
         if buffer_length.leading_zeros() == 0{
@@ -441,7 +445,7 @@ pub extern "C" fn imageflow_context_print_and_exit_if_error(context: *mut Contex
     let e = context!(context).outward_error();
     if e.has_error(){
         eprintln!("{}",e);
-        true
+        std::process::exit(e.category().process_exit_code())
     }else{
         false
     }
@@ -485,7 +489,6 @@ pub extern fn imageflow_json_response_read(context: *mut Context,
     true
 }
 
-
 /// Frees memory associated with the given object (and owned objects) after
 /// running any owned or attached destructors. Returns false if something went wrong during tear-down.
 ///
@@ -510,7 +513,7 @@ pub extern "C" fn imageflow_json_response_destroy(context: *mut Context,
 ///
 /// ## Endpoints
 ///
-/// * 'v0.1/build`
+/// * 'v1/build`
 ///
 /// For endpoints supported by the latest nightly build, see
 /// `https://s3-us-west-1.amazonaws.com/imageflow-nightlies/master/doc/context_json_api.txt`
@@ -588,24 +591,21 @@ pub fn create_abi_json_response(c: &mut Context,
         let sizeof_struct = std::mem::size_of::<JsonResponse>();
         let alloc_size = sizeof_struct + json_bytes.len();
 
-        let pointer = ::ffi::flow_context_calloc(c.flow_c(),
-                                                 1,
-                                                 alloc_size,
-                                                 ptr::null(),
-                                                 c.flow_c() as *mut libc::c_void,
-                                                 ptr::null(),
-                                                 line!() as i32) as *mut u8;
-        if pointer.is_null() {
-            c.outward_error_mut().try_set_error(nerror!(ErrorKind::AllocationFailed, "Failed to allocate JsonResponse ({} bytes)", alloc_size));
-            return ptr::null();
-        }
         if json_bytes.len().leading_zeros() == 0{
             c.outward_error_mut().try_set_error(nerror!(ErrorKind::Category(ErrorCategory::InternalError), "Error in creating JSON structure; length overflow prevented (most significant bit set)."));
             return ptr::null();
         }
 
+        let pointer = match c.mem_calloc(alloc_size, 16, ptr::null(), -1){
+            Err(e) => {
+                c.outward_error_mut().try_set_error(e);
+                return ptr::null();
+            }
+            Ok(v) => v
+        };
+
         let pointer_to_final_buffer =
-            pointer.offset(sizeof_struct as isize) as *mut libc::uint8_t;
+            pointer.offset(sizeof_struct as isize) as *mut u8;
         let imageflow_response = &mut (*(pointer as *mut JsonResponse));
         imageflow_response.buffer_utf8_no_nulls = pointer_to_final_buffer;
         imageflow_response.buffer_size = json_bytes.len();
@@ -752,7 +752,7 @@ pub extern "C" fn imageflow_context_get_output_buffer_by_id(context: *mut Contex
         let s = c.get_output_buffer_slice(io_id).map_err(|e| e.at(here!()))?;
 
         if s.len().leading_zeros() == 0 {
-            Err(nerror!(ErrorKind::Category(ErrorCategory::InternalError), "Error retriving output buffer; length overflow prevented (most significant bit set)."))
+            Err(nerror!(ErrorKind::Category(ErrorCategory::InternalError), "Error retrieving output buffer; length overflow prevented (most significant bit set)."))
         } else {
             unsafe {
                 (*result_buffer) = s.as_ptr();
@@ -780,16 +780,20 @@ pub extern "C" fn imageflow_context_memory_allocate(context: *mut Context,
                                                     bytes: libc::size_t,
                                                     filename: *const libc::c_char,
                                                     line: i32) -> *mut libc::c_void {
-
     let c = context_ready!(context);
 
-    if bytes.leading_zeros() == 0{
+    if bytes.leading_zeros() == 0 {
         c.outward_error_mut().try_set_error(nerror!(ErrorKind::InvalidArgument, "Argument `bytes` likely came from a negative integer. Imageflow prohibits having the leading bit set on unsigned integers (this reduces the maximum value to 2^31 or 2^63)."));
         return ptr::null_mut();
     }
-    unsafe {
-        ffi::flow_context_calloc(c.flow_c(), 1, bytes, ptr::null(), c.flow_c() as *const libc::c_void, filename, line)
-    }
+    let pointer = match unsafe{ c.mem_calloc(bytes, 16, filename, line) }{
+        Err(e) => {
+            c.outward_error_mut().try_set_error(e);
+            return ptr::null_mut();
+        }
+        Ok(v) => v
+    };
+    pointer as *mut libc::c_void
 }
 
 ///
@@ -803,13 +807,11 @@ pub extern "C" fn imageflow_context_memory_allocate(context: *mut Context,
 #[no_mangle]
 pub  extern "C" fn imageflow_context_memory_free(context: *mut Context,
                                                        pointer: *mut libc::c_void,
-                                                       filename: *const libc::c_char,
-                                                       line: i32) -> bool {
+                                                       _filename: *const libc::c_char,
+                                                       _line: i32) -> bool {
     let c = context!(context); // We must be able to free in an errored state
     if !pointer.is_null() {
-        unsafe {
-            ffi::flow_destroy(c.flow_c(), pointer, filename, line)
-        }
+        unsafe{ c.mem_free(pointer as *const u8) }
     }else {
         true
     }
@@ -831,7 +833,7 @@ pub fn exercise_json_message() {
         let expected_response = c::JsonResponse::teapot();
         let expected_json_out = ::std::str::from_utf8(
             expected_response.response_json.as_ref()).unwrap();
-        let expected_reponse_status = expected_response.status_code;
+        let expected_response_status = expected_response.status_code;
 
         let response = imageflow_context_send_json(c,
 
@@ -856,7 +858,7 @@ pub fn exercise_json_message() {
             ::std::str::from_utf8(std::slice::from_raw_parts(json_out_ptr, json_out_size)).unwrap();
         assert_eq!(json_out_str, expected_json_out);
 
-        assert_eq!(json_status_code, expected_reponse_status);
+        assert_eq!(json_status_code, expected_response_status);
 
         imageflow_context_destroy(c);
     }
@@ -886,9 +888,10 @@ fn test_allocate_free() {
 #[cfg(test)]
 extern crate base64;
 
+
 #[test]
 fn test_job_with_buffers() {
-    unsafe {
+    {
         let c = imageflow_context_create(IMAGEFLOW_ABI_VER_MAJOR, IMAGEFLOW_ABI_VER_MINOR);
         assert!(!c.is_null());
 
@@ -896,26 +899,23 @@ fn test_job_with_buffers() {
 
 
 
-        imageflow_context_add_input_buffer(c, 0, input_bytes.as_ptr(), input_bytes.len(), Lifetime::OutlivesContext);
+        let res = imageflow_context_add_input_buffer(c, 0, input_bytes.as_ptr(), input_bytes.len(), Lifetime::OutlivesContext);
         imageflow_context_print_and_exit_if_error(c);
+        assert!(res);
 
-
-        imageflow_context_add_output_buffer(c, 1);
+        let res = imageflow_context_add_output_buffer(c, 1);
         imageflow_context_print_and_exit_if_error(c);
+        assert!(res);
 
-
-        let method_in = static_char!("v0.1/execute");
-        let json_in = "{\"framewise\":{\"steps\":[{\"decode\":{\"io_id\":0}},{\"flip_h\":null},{\"rotate_90\":null},{\"resample_2d\":{\"w\":30,\"h\":20,\"down_filter\":null,\"up_filter\":null,\"hints\":{\"sharpen_percent\":null}}},{\"constrain\":{\"within\":{\"w\":5,\"h\":5}}},{\"encode\":{\"io_id\":1,\"preset\":{\"gif\":null}}}]}}";
+        let method_in = static_char!("v1/execute");
+        let json_in = r#"{"framewise":{"steps":[{"decode":{"io_id":0}},{"flip_h":null},{"rotate_90":null},{"resample_2d":{"w":30,"h":20,"hints":{"sharpen_percent":null}}},{"constrain":{ "mode" :"within", "w": 5,"h": 5}},{"encode":{"io_id":1,"preset":{"gif":null}}}]}}"#;
 
         let response = imageflow_context_send_json(c,
-
                                                    method_in,
                                                    json_in.as_ptr(),
                                                    json_in.len());
 
-        assert_ne!(response, ptr::null());
-        imageflow_context_print_and_exit_if_error(c);
-
+        assert!(!response.is_null());
 
         let mut json_out_ptr: *const u8 = ptr::null_mut();
         let mut json_out_size: usize = 0;
@@ -928,22 +928,16 @@ fn test_job_with_buffers() {
                                              &mut json_out_size));
 
 
-        let json_out_str =
-            ::std::str::from_utf8(std::slice::from_raw_parts(json_out_ptr, json_out_size)).unwrap();
+        imageflow_context_print_and_exit_if_error(c);
 
 
         let mut buf: *const u8 = ptr::null();
         let mut buf_len: usize = 0;
-        assert!(imageflow_context_get_output_buffer_by_id(c, 1, &mut buf as *mut *const u8, &mut buf_len as *mut usize));
-
-
+        let res = imageflow_context_get_output_buffer_by_id(c, 1, &mut buf as *mut *const u8, &mut buf_len as *mut usize);
         imageflow_context_print_and_exit_if_error(c);
+        assert!(res);
 
-        let expected_json_out = "{\n  \"code\": 200,\n  \"success\": true,\n  \"message\": \"OK\",\n  \"data\": {\n    \"job_result\": {\n      \"encodes\": [\n        {\n          \"preferred_mime_type\": \"image/gif\",\n          \"preferred_extension\": \"gif\",\n          \"io_id\": 1,\n          \"w\": 5,\n          \"h\": 3,\n          \"bytes\": \"elsewhere\"\n        }\n      ],\n      \"performance\": {\n        \"frames\": [\n          {\n            \"nodes\": [\n              {\n                \"wall_microseconds\": 3911,\n                \"name\": \"primitive_encoder\"\n              },\n              {\n                \"wall_microseconds\": 62,\n                \"name\": \"scale_2d_to_canvas\"\n              },\n              {\n                \"wall_microseconds\": 39,\n                \"name\": \"primitive_decoder\"\n              },\n              {\n                \"wall_microseconds\": 32,\n                \"name\": \"scale_2d_to_canvas\"\n              },\n              {\n                \"wall_microseconds\": 6,\n                \"name\": \"create_canvas\"\n              },\n              {\n                \"wall_microseconds\": 5,\n                \"name\": \"transpose_mut\"\n              },\n              {\n                \"wall_microseconds\": 4,\n                \"name\": \"flip_vertical_mutate\"\n              },\n              {\n                \"wall_microseconds\": 3,\n                \"name\": \"create_canvas\"\n              },\n              {\n                \"wall_microseconds\": 3,\n                \"name\": \"flip_vertical_mutate\"\n              },\n              {\n                \"wall_microseconds\": 2,\n                \"name\": \"create_canvas\"\n              }\n            ],\n            \"wall_microseconds\": 4678,\n            \"overhead_microseconds\": 611\n          }\n        ]\n      }\n    }\n  }\n}";
         let expected_response_status = 200;
-
-
-        //assert_eq!(json_out_str, expected_json_out);
         assert_eq!(json_status_code, expected_response_status);
 
         imageflow_context_destroy(c);
@@ -951,6 +945,87 @@ fn test_job_with_buffers() {
 }
 
 
+#[test]
+fn test_job_with_bad_json() {
+    {
+        let c = imageflow_context_create(IMAGEFLOW_ABI_VER_MAJOR, IMAGEFLOW_ABI_VER_MINOR);
+        assert!(!c.is_null());
+
+        let input_bytes = base64::decode(&b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABAQMAAAAl21bKAAAAA1BMVEX/TQBcNTh/AAAAAXRSTlPM0jRW/QAAAApJREFUeJxjYgAAAAYAAzY3fKgAAAAASUVORK5CYII=".to_vec()).unwrap();
+
+
+
+        let res = imageflow_context_add_input_buffer(c, 0, input_bytes.as_ptr(), input_bytes.len(), Lifetime::OutlivesContext);
+        imageflow_context_print_and_exit_if_error(c);
+        assert!(res);
+
+        let res = imageflow_context_add_output_buffer(c, 1);
+        imageflow_context_print_and_exit_if_error(c);
+        assert!(res);
+
+        let method_in = static_char!("v1/execute");
+        let json_in = r#"{"framewise":{"steps":[{"decode":{"io_id":0}},{"flip_h":null},{"rotate_90":null},{"resample_2d":{"w":30,"h":20,"down_filter":null,"up_filter":null,"hints":{"sharpen_percent":null}}},{"constrain":{"within":{"w":5,"h":5}}},{"encode":{"io_id":1,"preset":{"gif":null}}}]}}"#;
+
+        let response = imageflow_context_send_json(c,
+                                                   method_in,
+                                                   json_in.as_ptr(),
+                                                   json_in.len());
+
+        assert!(!response.is_null());
+
+
+        let mut json_out_ptr: *const u8 = ptr::null_mut();
+        let mut json_out_size: usize = 0;
+        let mut json_status_code: i64 = 0;
+
+        assert!(imageflow_json_response_read(c,
+                                             response,
+                                             &mut json_status_code,
+                                             &mut json_out_ptr,
+                                             &mut json_out_size));
+        assert!(imageflow_context_has_error(c));
+
+        let expected_response_status = 400; //bad request
+        assert_eq!(json_status_code, expected_response_status);
+
+        imageflow_context_destroy(c);
+    }
+}
+
+
+#[test]
+fn test_get_version_info() {
+    let c = imageflow_context_create(IMAGEFLOW_ABI_VER_MAJOR, IMAGEFLOW_ABI_VER_MINOR);
+    assert!(!c.is_null());
+
+
+    let method_in = static_char!("v1/get_version_info");
+    let json_in = "{}";
+
+    let response = imageflow_context_send_json(c,
+                                               method_in,
+                                               json_in.as_ptr(),
+                                               json_in.len());
+
+    assert!(!response.is_null());
+
+
+    let mut json_out_ptr: *const u8 = ptr::null_mut();
+    let mut json_out_size: usize = 0;
+    let mut json_status_code: i64 = 0;
+
+    assert!(imageflow_json_response_read(c,
+                                         response,
+                                         &mut json_status_code,
+                                         &mut json_out_ptr,
+                                         &mut json_out_size));
+    assert!(!imageflow_context_has_error(c));
+
+    let expected_response_status = 200; //bad request
+    assert_eq!(json_status_code, expected_response_status);
+
+    imageflow_context_destroy(c);
+}
 
 #[test]
 fn test_file_macro_for_this_build(){

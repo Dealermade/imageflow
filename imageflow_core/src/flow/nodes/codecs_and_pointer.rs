@@ -1,6 +1,8 @@
 use super::internal_prelude::*;
+use slotmap::{KeyData, Key};
+use crate::ErrorKind::BitmapKeyNotFound;
 
-pub static BITMAP_BGRA_POINTER: BitmapBgraDef = BitmapBgraDef{};
+pub static BITMAP_KEY_POINTER: BitmapKeyDef = BitmapKeyDef{};
 
 pub static DECODER: DecoderDef = DecoderDef{};
 pub static ENCODE: EncoderDef = EncoderDef{};
@@ -8,24 +10,24 @@ pub static PRIMITIVE_DECODER: DecoderPrimitiveDef = DecoderPrimitiveDef{};
 
 
 #[derive(Debug,Clone)]
-pub struct BitmapBgraDef{}
+pub struct BitmapKeyDef{}
 
-impl BitmapBgraDef{
-    fn get(&self, p: &NodeParams) -> Result<*mut *mut BitmapBgra> {
-        if let NodeParams::Json(s::Node::FlowBitmapBgraPtr { ptr_to_flow_bitmap_bgra_ptr }) = *p {
-            let ptr: *mut *mut BitmapBgra = ptr_to_flow_bitmap_bgra_ptr as *mut *mut BitmapBgra;
+impl BitmapKeyDef{
+    fn get_key_ptr(&self, p: &NodeParams) -> Result<*mut u64> {
+        if let NodeParams::Json(s::Node::FlowBitmapKeyPtr { ptr_to_bitmap_key }) = *p {
+            let ptr: *mut u64 = ptr_to_bitmap_key as *mut u64;
             if ptr.is_null() {
-                return Err(nerror!(::ErrorKind::InvalidNodeParams, "The pointer to the bitmap bgra pointer is null! Must be a valid reference to a pointer's location."));
+                return Err(nerror!(crate::ErrorKind::InvalidNodeParams, "The pointer to the bitmap key is null! Must be a valid reference to a pointer's location."));
             } else {
                 Ok(ptr)
             }
         }else{
-            Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need FlowBitmapBgraPtr, got {:?}", p))
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need FlowBitmapKeyPtr, got {:?}", p))
         }
     }
 }
 
-impl NodeDef for BitmapBgraDef {
+impl NodeDef for BitmapKeyDef {
     fn fqn(&self) -> &'static str {
         "imazen.bitmap_bgra_pointer"
     }
@@ -34,26 +36,30 @@ impl NodeDef for BitmapBgraDef {
     }
 
     fn validate_params(&self, p: &NodeParams) -> Result<()> {
-        self.get(p).map_err(|e| e.at(here!())).map(|_| ())
+        self.get_key_ptr(p).map_err(|e| e.at(here!())).map(|_| ())
     }
 
     fn estimate(&self, ctx: &mut OpCtxMut, ix: NodeIndex) -> Result<FrameEstimate> {
         let params = &ctx.weight(ix).params;
 
-        let ptr = self.get(params).map_err(|e| e.at(here!()))?;
+        let key_ptr = self.get_key_ptr(params).map_err(|e| e.at(here!()))?;
 
-        unsafe {
-            if (*ptr).is_null() {
-                let input = ctx.frame_est_from(ix, EdgeKind::Input).map_err(|e| e.at(here!()))?;
-                Ok(input)
-            } else {
-                let b = &(**ptr);
-                Ok(FrameEstimate::Some(FrameInfo {
-                    w: b.w as i32,
-                    h: b.h as i32,
-                    fmt: b.fmt,
-                }))
-            }
+        //This is the dangerous step, as the pointer may be invalid
+        let key: BitmapKey = KeyData::from_ffi(unsafe { *key_ptr }).into();
+
+
+        let bitmaps = ctx.c.borrow_bitmaps()
+            .map_err(|e| e.at(here!()))?;
+
+        // TODO: make this faster by not calling try_borrow_mut which adds unnecessary error data
+        let bitmap_maybe = bitmaps.try_borrow_mut(key);
+
+
+        if bitmap_maybe.is_err() {
+            let input = ctx.frame_est_from(ix, EdgeKind::Input).map_err(|e| e.at(here!()))?;
+            Ok(input)
+        } else {
+            Ok(FrameEstimate::Some(bitmap_maybe.unwrap().frame_info()))
         }
     }
 
@@ -62,19 +68,27 @@ impl NodeDef for BitmapBgraDef {
     }
 
     fn execute(&self, ctx: &mut OpCtxMut, ix: NodeIndex) -> Result<NodeResult> {
-        let ptr = self.get(&ctx.weight(ix).params).map_err(|e| e.at(here!()))?;
+        let key_ptr = self.get_key_ptr(&ctx.weight(ix).params).map_err(|e| e.at(here!()))?;
 
-        let frame = ctx.first_parent_result_frame(ix, EdgeKind::Input);
-        if let Some(input_ptr) = frame {
-            unsafe { *ptr = input_ptr };
+        let parent_frame = ctx.first_parent_result_frame(ix, EdgeKind::Input);
+        if let Some(bitmap_key) = parent_frame {
+
             ctx.consume_parent_result(ix, EdgeKind::Input)?;
-            Ok(NodeResult::Frame(input_ptr))
+
+            // Also very dangerous, as invalid data can cause us to write this byte to arbitrary
+            // memory
+            unsafe {
+                *key_ptr = KeyData::from(bitmap_key).as_ffi();
+            }
+            Ok(NodeResult::Frame(bitmap_key))
         } else {
             unsafe {
-                if (*ptr).is_null() {
-                    return Err(nerror!(::ErrorKind::InvalidNodeParams, "When serving as an input node (no parent), FlowBitmapBgraPtr must point to a pointer to a valid BitmapBgra struct."));
+                if (*key_ptr) == 0 ||
+                    BitmapKey::from(KeyData::from_ffi(*key_ptr)).is_null(){
+                    return Err(nerror!(crate::ErrorKind::InvalidNodeParams, "When serving as an input node (no parent), FlowBitmapKeyPtr must point to a u64 (BitmapKey in ffi mode)."));
                 }
-                Ok(NodeResult::Frame(*ptr))
+                //Ok(NodeResult::Frame(*ptr))
+                Ok(NodeResult::Frame(BitmapKey::null()))
             }
         }
     }
@@ -87,12 +101,12 @@ fn decoder_get_io_id(params: &NodeParams) -> Result<i32> {
     if let NodeParams::Json(s::Node::Decode { io_id, .. }) = *params {
         Ok(io_id)
     }else{
-        Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need Decode, got {:?}", params))
+        Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need Decode, got {:?}", params))
     }
 }
 fn decoder_estimate(ctx: &mut OpCtxMut, ix: NodeIndex) -> Result<FrameEstimate> {
     let io_id = decoder_get_io_id(&ctx.weight(ix).params).map_err(|e| e.at(here!()))?;
-    let frame_info = ctx.job.get_image_info(io_id).map_err(|e| e.at(here!()))?;
+    let frame_info = ctx.c.get_scaled_unrotated_image_info(io_id).map_err(|e| e.at(here!()))?;
 
     Ok(FrameEstimate::Some(FrameInfo {
         fmt: frame_info.frame_decodes_into,
@@ -129,7 +143,7 @@ impl NodeDef for DecoderDef {
         let io_id = decoder_get_io_id(&ctx.weight(ix).params)?;
 
         // Add the necessary rotation step afterwards
-        if let Some(exif_flag) = ctx.job.get_exif_rotation_flag(io_id).map_err(|e| e.at(here!()))?{
+        if let Some(exif_flag) = ctx.c.get_exif_rotation_flag(io_id).map_err(|e| e.at(here!()))?{
             if exif_flag > 0 {
                 let new_node = ctx.graph
                     .add_node(Node::n(&APPLY_ORIENTATION,
@@ -160,7 +174,7 @@ impl DecoderPrimitiveDef{
         if let NodeParams::Json(s::Node::Decode { io_id, ref commands }) = *params {
             Ok((io_id, commands.clone()))
         }else{
-            Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need Decode, got {:?}", params))
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need Decode, got {:?}", params))
         }
     }
 }
@@ -198,6 +212,10 @@ impl NodeDef for DecoderPrimitiveDef {
     fn execute(&self, ctx: &mut OpCtxMut, ix: NodeIndex) -> Result<NodeResult> {
         let io_id = decoder_get_io_id(&ctx.weight(ix).params)?;
 
+        let estimate = self.estimate(ctx, ix)?;
+
+        validate_frame_size(estimate, &ctx.c.security.max_decode_size, "max_decode_size")?;
+
         let mut codec = ctx.c.get_codec(io_id).map_err(|e| e.at(here!()))?;
         let decoder = codec.get_decoder().map_err(|e| e.at(here!()))?;
 
@@ -211,6 +229,33 @@ impl NodeDef for DecoderPrimitiveDef {
     }
 }
 
+fn validate_frame_size(est: FrameEstimate, limit_maybe: &Option<imageflow_types::FrameSizeLimit>, limit_name: &'static str) -> Result<()>{
+    if let Some(limit)= limit_maybe {
+        // Validate frame size
+        let info = match est {
+            FrameEstimate::Some(info) => Some(info),
+            FrameEstimate::UpperBound(info) => Some(info),
+            _ => None
+        };
+        if let Some(frame_info) = info {
+            if limit.w.leading_zeros() == 0 ||
+                limit.h.leading_zeros() == 0 {
+                return Err(nerror!(ErrorKind::SizeLimitExceeded, "{} values overflow an i32", limit_name));
+            }
+            if frame_info.w > limit.w as i32 {
+                return Err(nerror!(ErrorKind::SizeLimitExceeded, "Frame width {} exceeds {}.w {}", frame_info.w, limit_name, limit.w))
+            }
+            if frame_info.h > limit.h as i32 {
+                return Err(nerror!(ErrorKind::SizeLimitExceeded, "Frame height {} exceeds {}.h {}", frame_info.h, limit_name, limit.h))
+            }
+            let megapixels = frame_info.w as f32 * frame_info.h as f32  / 1000000f32;
+            if megapixels > limit.megapixels {
+                return Err(nerror!(ErrorKind::SizeLimitExceeded, "Frame megapixels {} exceeds {}.megapixels {}", megapixels, limit_name, limit.megapixels))
+            }
+        }
+    }
+    Ok(())
+}
 
 
 
@@ -222,7 +267,7 @@ impl EncoderDef{
         if let NodeParams::Json(s::Node::Encode { io_id, ref preset }) = *params {
             Ok((io_id, preset.clone()))
         }else{
-            Err(nerror!(::ErrorKind::NodeParamsMismatch, "Need Encode, got {:?}", params))
+            Err(nerror!(crate::ErrorKind::NodeParamsMismatch, "Need Encode, got {:?}", params))
         }
     }
 }
@@ -249,12 +294,19 @@ impl NodeDef for EncoderDef {
 
     fn execute(&self, ctx: &mut OpCtxMut, ix: NodeIndex) -> Result<NodeResult> {
         let (io_id, preset) = self.get(&ctx.weight(ix).params)?;
-        let input_bitmap = ctx.bitmap_bgra_from(ix, EdgeKind::Input).map_err(|e| e.at(here!()))?;
+
+
+        let input_key = ctx.bitmap_key_from(ix, EdgeKind::Input)
+            .map_err(|e| e.at(here!()))?;
+
+        // Validate max encode size
+        let estimate = self.estimate(ctx, ix)?;
+        validate_frame_size(estimate, &ctx.c.security.max_encode_size, "max_encode_size")?;
 
         let decoders = ctx.get_decoder_io_ids_and_indexes(ix).into_iter().map(|(io_id, ix)| io_id).collect::<Vec<i32>>();
 
-        let mut codec = ctx.job.get_codec(io_id).map_err(|e| e.at(here!()))?;
-        let result = codec.write_frame(ctx.c, &preset,unsafe{ &mut *input_bitmap }, &decoders ).map_err(|e| e.at(here!()))?;
+        let mut codec = ctx.c.get_codec(io_id).map_err(|e| e.at(here!()))?;
+        let result = codec.write_frame(ctx.c, &preset,input_key, &decoders ).map_err(|e| e.at(here!()))?;
 
 
         Ok(NodeResult::Encoded(result))

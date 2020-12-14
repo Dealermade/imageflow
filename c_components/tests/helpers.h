@@ -17,16 +17,21 @@
 extern "C" {
 #endif
 
+
+#include <sys/stat.h>
+
+
 #ifdef _MSC_VER
 #include "io.h"
 #pragma warning(error : 4005)
-
+    #define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+    #define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
 #ifndef _UNISTD_H
 #define _UNISTD_H 1
 
 /* This file intended to serve as a drop-in replacement for
 *  unistd.h on Windows
-*  Please add functionality as neeeded
+*  Please add functionality as needed
 */
 
 #include <stdlib.h>

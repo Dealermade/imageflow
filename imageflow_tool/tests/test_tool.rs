@@ -1,7 +1,4 @@
-#![feature(alloc_system)]
 #[cfg_attr(feature = "cargo-clippy", allow(useless_attribute))]
-#[allow(unused_extern_crates)]
-extern crate alloc_system;
 extern crate imageflow_tool_lib;
 extern crate imageflow_types as s;
 use std::io::Write;
@@ -9,8 +6,8 @@ use std::path::{Path,PathBuf};
 
 
 fn build_dirs() -> Vec<PathBuf>{
-    let target_triple = ::s::version::get_build_env_value("TARGET").expect("TARGET triple required");
-    let profile = ::s::version::get_build_env_value("PROFILE").expect("PROFILE (debug/release) required");
+    let target_triple = crate::s::version::get_build_env_value("TARGET").expect("TARGET triple required");
+    let profile = crate::s::version::get_build_env_value("PROFILE").expect("PROFILE (debug/release) required");
 
 
     let target_dir = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("target");

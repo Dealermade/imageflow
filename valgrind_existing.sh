@@ -38,16 +38,18 @@ SKIP_BINARIES+=("$(ls ./"${TEST_BINARIES_TARGET}"release/test_ir4* || true )")
 SKIP_BINARIES+=("$(ls ./"${TEST_BINARIES_TARGET}"release/*imageflow_helpers* || true )")
 SKIP_BINARIES+=("$(ls ./"${TEST_BINARIES_TARGET}"release/*imageflow_riapi* || true )")
 SKIP_BINARIES+=("$(ls ./"${TEST_BINARIES_TARGET}"release/*imageflow_types* || true )")
+SKIP_BINARIES+=("$(ls ./"${TEST_BINARIES_TARGET}"release/bench_graphics* || true )")
+
 function join_by { local IFS="$1"; shift; echo "$*"; }
 SKIP_BINARIES_STR="$(join_by " " "${SKIP_BINARIES[@]}")"
 SKIP_BINARIES_STR=" $SKIP_BINARIES_STR "
 echo "Should skip: ${SKIP_BINARIES_STR}"
 
 
-# If we're running as 'conan' (we assume this indicates we are in a docker container)
+# If we're running as 'imageflow' (we assume this indicates we are in a docker container)
 # Then we need to also change permissions so that .valgrindrc is respected
 # It cannot be world-writable, and should be owned by the current user (according to valgrind)
-export CHOWN_VALGRIND_FILE_IF_USER_IS="${CHOWN_VALGRIND_FILE_IF_USER_IS:-conan}"
+export CHOWN_VALGRIND_FILE_IF_USER_IS="${CHOWN_VALGRIND_FILE_IF_USER_IS:-imageflow}"
 
 create_valgrind_files_in()(
 	(
